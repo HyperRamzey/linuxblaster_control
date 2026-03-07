@@ -27,13 +27,13 @@
    - [0x6c — DacFilter](#0x6c--dacfilter)
    - [0x6e — Notification](#0x6e--notification)
 5. [Feature Family 0x96 — DSP Effects](#family-0x96--dsp-effects)
-6. [How To: Common Operations](#how-to-common-operations)
-7. [Open Questions](#open-questions)
-8. [Appendix A: Known But Unused](#appendix-a-known-but-unused)
+6. [Feature Family 0x95 — Recording Pane](#family-0x95--recording-pane)
+7. [How To: Common Operations](#how-to-common-operations)
+8. [Open Questions](#open-questions)
+9. [Appendix A: Known But Unused](#appendix-a-known-but-unused)
    - [Multi-Feature StatusResponse](#multi-feature-statusresponse)
    - [0x39 — Direct Mode](#0x39--direct-mode)
-   - [Family 0x95 — Playback / Routing](#family-0x95--playback--routing)
-   - [Family 0x97 — Hardware](#family-0x97--hardware)
+   - [Family 0x97 — Hardware / Decoder](#family-0x97--hardware--decoder)
 
 ---
 
@@ -106,7 +106,7 @@ Phase 2 — Feature State Readback
   0x6c  DAC filter query
 
 Phase 3 — Apply Saved Profile
-  0x12  Write speaker levels (0x95:0x14–0x1b)
+  0x12  Write mic EQ bands (0x95:0x14–0x1b)
   0x12  Write EQ bands (0x96:0x0a–0x14)
   0x12  Write EQ toggle (0x96:0x09)
 
@@ -409,7 +409,9 @@ The on/off command (sub `0x06`) was mistakenly identified as "Capabilities Confi
 
 ### 0x3c — GainConfig
 
-Likely controls headphone amplifier gain / impedance setting.
+Dual-purpose command. Sub-commands control headphone amplifier gain and mic boost.
+
+#### Read headphone gain (sub 0x02)
 
 ```
 Send: 5a 3c 02 01 00
@@ -419,6 +421,19 @@ Recv: 5a 3c 04 01 00 [gain] 00
 Observed: gain = `0x02`
 
 **UNKNOWN:** Valid gain values, what they map to (impedance levels? gain stages?).
+
+#### Write mic boost (sub 0x04)
+
+```
+Send: 5a 3c 04 00 00 02 [dB_u32_LE] 00 00 00 00 ...
+```
+
+| Value (u32 LE) | Mic boost |
+|----------------|-----------|
+| `0x00000000`   | 0 dB      |
+| `0x0a000000`   | 10 dB     |
+| `0x14000000`   | 20 dB     |
+| `0x1e000000`   | 30 dB     |
 
 ---
 
@@ -533,6 +548,58 @@ EQ dB ranges confirmed via BulkRangeDump (`0x15`).
 | `0x70` | **UNKNOWN**   | 0.0      | Seen in profile bulk transfers only |
 | `0x71` | **UNKNOWN**   | 0.0      | Seen in profile bulk transfers only |
 | `0x72` | **UNKNOWN**   | 0.0      | Seen in profile bulk transfers only |
+
+---
+
+## Family 0x95 — Recording Pane
+
+Features for the recording pane (mic input): Voice Clarity, Acoustic Echo Cancellation, Mic EQ.
+Read/written via standard `0x11`/`0x12` commands.
+
+### Voice Clarity and Related
+
+| ID     | Name                                | Type     | Values                                        |
+|--------|-------------------------------------|----------|-----------------------------------------------|
+| `0x00` | Acoustic Echo Cancellation          | Bool     | 0.0 / 1.0                                     |
+| `0x04` | Voice Clarity (master)              | Bool     | 0.0 / 1.0                                     |
+| `0x05` | Voice Clarity Noise Reduction Level | Float    | 0.0–1.0 (0%, 20%, 40%, 60%, 80%, 100%)        |
+| `0x13` | Mic EQ Enable                       | Bool     | 0.0 / 1.0                                     |
+| `0x14`–`0x1b` | Mic EQ Band 1–8 (suspected)    | dB (f32) | Per-band gain, ±12 dB typical. **Not confirmed.** |
+
+**Evidence for 0x14–0x1b as Mic EQ bands:** Packet captures show that when selecting a mic EQ preset, the software sends `5a 12 07 01 95 [14-1b] 00 [f32_LE]` with f32 dB values (e.g. `a0 c0` = -5.0, `80 c0` = -4.0, `40 40` ≈ 3.0). These are suspected to be EQ band writes. The EQ sliders (bands 0x14–0x1b as individual controls) are **suspected, not confirmed**.
+
+**Noise Reduction value encoding (f32):** The device uses a 0.0–0.5 f32 range for 0–100%. Formula: `percent = f32 × 200`. Observed values:
+
+| UI % | f32   | Hex (LE)     |
+|------|-------|---------------|
+| 0    | 0.0   | `00 00 00 00` |
+| 20   | 0.05  | `cd cc 4c 3d` |
+| 40   | 0.2   | `cd cc 4c 3e` |
+| 60   | 0.3   | `9a 99 99 3e` |
+| 80   | 0.4   | `cd cc cc 3e` |
+| 100  | 0.5   | `00 00 00 3f` |
+
+**Note:** The 20% value (0.05) does not follow a simple percent/100 scale — 0.05 × 200 = 10%, so either the encoding or the g6-cli capture labels are inconsistent. Use `percent = f32 × 200` for conversion.
+
+### Mic EQ Presets
+
+*Not implemented yet — direct EQ sliders are planned first.*
+
+Preset data from captures (8 f32 values for bands 0x14–0x1b, hex LE):
+
+| Preset | 0x14 | 0x15 | 0x16 | 0x17 | 0x18 | 0x19 | 0x1a | 0x1b |
+|--------|------|------|------|------|------|------|------|------|
+| 1 | 0000 40c0 | 0000 80c0 | 0000 0000 | 0000 4000 | 0000 4040 | 0000 40c0 | 0000 8040 | 0000 a040 |
+| 2 | 0000 40c0 | 0000 80c0 | 0000 0000 | 0000 4000 | 0000 8040 | 0000 00c0 | 0000 0040 | 0000 8040 |
+| 3 | 0000 00c0 | 0000 40c0 | 0000 4040 | 0000 8040 | 0000 8040 | 0000 80c0 | 0000 4040 | 0000 0040 |
+| 4 | 0000 40c0 | 0000 a0c0 | 0000 0000 | 0000 8040 | 0000 0000 | 0000 40c0 | 0000 0000 | 0000 0000 |
+| 5 | 0000 00c0 | 0000 40c0 | 0000 0040 | 0000 8040 | 0000 8040 | 0000 0000 | 0000 40c0 | 0000 0040 |
+| 6 | 0000 a0c0 | 0000 80c0 | 0000 00c0 | 0000 0000 | 0000 4040 | 0000 8040 | 0000 c040 | 0000 e040 |
+| 7 | 0000 0000 | 0000 4040 | 0000 00c0 | 0000 80c0 | 0000 80c0 | 0000 00c0 | 0000 a040 | 0000 e040 |
+| 8 | 0000 0000 | 0000 0000 | 0000 0040 | 0000 0040 | 0000 4040 | 0000 80c0 | 0000 0040 | 0000 8040 |
+| 9 | 0000 0000 | 0000 0000 | 0000 0040 | 0000 0040 | 0000 00c0 | 0000 0000 | 0000 80c0 | 0000 8040 |
+| 10 | 0000 0000 | 0000 0040 | 0000 00c0 | 0000 0000 | 0000 4040 | 0000 a040 | 0000 c040 | 0000 a040 |
+| DM_1 | 0000 0000 | 0000 0041 | 0000 0000 | 0000 4041 | 0000 4041 | 0000 8040 | 0000 0041 | 0000 2041 |
 
 ---
 
@@ -660,11 +727,10 @@ Recv: 5a 3c 04 01 00 [gain] 00
 
 ### Unidentified features
 - **Family 0x96:** IDs 0x15, 0x16, 0x1a–0x1d, 0x70–0x72 — purpose unknown
-- **Family 0x97:** Only 0x02 observed (value 2.0) — purpose unknown
 
 ### Commands not fully decoded
 - **0x3a Capabilities:** Read-mode sub-commands not fully understood
-- **0x3c GainConfig:** Valid values and hardware mapping unknown
+- **0x3c GainConfig:** Headphone gain values and hardware mapping unknown
 - **0x6e Notification:** Trigger conditions and full protocol unknown
 
 ### Protocol questions
@@ -747,41 +813,16 @@ Sub-commands `0x04` and `0x05` return ACK with `0x81` error (not supported on G6
 
 ---
 
-### Family 0x95 — Playback / Routing
+### Family 0x97 — Hardware / Decoder
 
-Read/written via standard `0x11`/`0x12` commands. The device stores separate profiles per output mode;
-`0x95:0x13` is the only feature observed to differ between headphone and speaker profiles
-(0.0 for headphones, 1.0 for speakers).
+| ID     | Name          | Type   | Values                    | Notes                    |
+|--------|---------------|--------|---------------------------|--------------------------|
+| `0x02` | Decoder Mode  | Preset | See below                 | Normal / Full / Night    |
 
-| ID     | Name (guessed)    | Type    | Observed Value | Notes                    |
-|--------|-------------------|---------|----------------|--------------------------|
-| `0x00` | **UNKNOWN**       |         | 0.0            |                          |
-| `0x04` | SurroundEnable?   | Bool    | 1.0            |                          |
-| `0x05` | **UNKNOWN**       |         | 0.0            |                          |
-| `0x0a` | **UNKNOWN**       |         | 0.0            |                          |
-| `0x0b` | CrossoverLow?     | Hz      | 400.0          | Crossover frequency      |
-| `0x0c` | CrossoverMid?     | Hz      | 1400.0         | Crossover frequency      |
-| `0x0d` | CrossoverHigh?    | Hz      | 2000.0         | Crossover frequency      |
-| `0x0e` | ChannelEnableA?   | Bool    | 1.0            |                          |
-| `0x0f` | ChannelEnableB?   | Bool    | 1.0            |                          |
-| `0x10` | ChannelEnableC?   | Bool    | 1.0            |                          |
-| `0x11` | **UNKNOWN**       |         | 0.0            |                          |
-| `0x12` | **UNKNOWN**       |         | 0.0            |                          |
-| `0x13` | OutputModeFlag?   | Bool    | 0.0 / 1.0      | 0.0=HP, 1.0=Speaker      |
-| `0x14` | SpeakerLevel FL?  | dB      | -3.0           | Written at startup       |
-| `0x15` | SpeakerLevel FR?  | dB      | -4.0           | Written at startup       |
-| `0x16` | SpeakerLevel C?   | dB      | 0.0            | Written at startup       |
-| `0x17` | SpeakerLevel SL?  | dB      | 2.0            | Written at startup       |
-| `0x18` | SpeakerLevel SR?  | dB      | 3.0            | Written at startup       |
-| `0x19` | SpeakerLevel RL?  | dB      | -3.0           | Written at startup       |
-| `0x1a` | SpeakerLevel RR?  | dB      | 4.0            | Written at startup       |
-| `0x1b` | SpeakerLevel Sub? | dB      | 5.0            | Written at startup       |
-| `0x1c`–`0x2d` | **UNKNOWN** |       | 0.0            | All zero in both profiles |
+**Decoder mode values (f32 LE):**
 
----
-
-### Family 0x97 — Hardware
-
-| ID     | Name          | Observed | Notes                    |
-|--------|---------------|----------|--------------------------|
-| `0x02` | **UNKNOWN**   | 2.0      | Queried once during init |
+| Value | Hex (LE)     | Mode   |
+|-------|---------------|--------|
+| 2.0   | `00 00 00 40` | Normal |
+| 1.0   | `00 00 80 3f` | Full   |
+| 3.0   | `00 00 40 40` | Night  |
