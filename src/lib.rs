@@ -53,6 +53,7 @@ pub struct BlasterXG6 {
 impl BlasterXG6 {
     pub fn init() -> Self {
         let device_connection = DEVICE_CONNECTION.get_or_init(|| {
+            #[cfg(not(debug_assertions))]
             Self::reset_usb();
 
             let api = HidApi::new().expect("Failed to create HID API");
@@ -94,7 +95,8 @@ impl BlasterXG6 {
         drop(handle);
         // the kernel needs time to re-enumerate,
         // and the device sends some initial data we don't care about
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // TODO: replace fixed wait time with packet readout to check if reset is complete
+        std::thread::sleep(std::time::Duration::from_secs(3));
         info!("Device reset complete.");
     }
 

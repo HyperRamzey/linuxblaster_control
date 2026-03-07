@@ -116,7 +116,7 @@ impl eframe::App for BlasterApp {
                     let _two = 1 + 1;
                 }
                 "Playback" => {
-                    todo!();
+                    playback_pane(&self.0, ui);
                 }
                 "Recording" => {
                     todo!();
@@ -139,7 +139,7 @@ impl eframe::App for BlasterApp {
 fn nav_pane(
     blaster: &BlasterXG6, 
     ui: &mut egui::Ui, 
-    pane_name: &str,
+    pane_name: &'static str,
     feature_id: Option<FeatureId>, 
     with_selector: bool,
 ) {
@@ -173,10 +173,7 @@ fn nav_pane(
                     .frame_when_inactive(true);
 
                     if ui.add(selector_button).clicked() {
-                        let mut selected = UI_SELECTED.lock().unwrap();
-                        if *selected == pane_name {
-                            *selected = "";
-                        }
+                        *UI_SELECTED.lock().unwrap() = pane_name;
                     }
                 });
             }
@@ -524,4 +521,66 @@ fn calculate_peaking_eq_response(freq: f64, center_freq: f64, gain: f64, q: f64)
     let diff = (freq - center_freq).abs();
     let falloff = 1.0 / (1.0 + (diff / (bandwidth * 0.5)).powf(2.0));
     gain * falloff
+}
+
+fn playback_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
+    let output_toggle = blaster.feature(FeatureId::Output);
+
+    ui.columns(2, |columns| {
+        columns[0].with_layout(Layout::top_down_justified(Align::TOP), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Output").color(Color32::GRAY));
+            });
+            ui.separator(); 
+
+            ui.horizontal(|ui| {
+                // Speaker Toggle Button
+                let speaker_toggle = toggle_button!(
+                    ui,
+                    output_toggle.as_bool(),
+                    "Speakers",
+                    width = 100.0,
+                );
+                // Headphone Toggle Button 
+                let headphone_toggle = toggle_button!(
+                    ui,
+                    !output_toggle.as_bool(),
+                    "Headphones",
+                    width = 100.0,
+                );
+
+                // yeah yeah code duplication, but it's easier to read this way
+                if speaker_toggle.clicked() && !output_toggle.as_bool() {
+                    let _ = blaster.set_feature(output_toggle.id, None);
+                }
+                // and quite maintainable at this scale 
+                if headphone_toggle.clicked() && output_toggle.as_bool() {
+                    let _ = blaster.set_feature(output_toggle.id, None);
+                }
+            });
+        });
+
+        columns[1].with_layout(Layout::top_down_justified(Align::TOP), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Filter").color(Color32::GRAY));
+            });
+            ui.separator();
+            
+            let dac_filter = blaster.feature(FeatureId::DacFilter);
+            let mut selected = dac_filter.value() as usize;
+            let ValueKind::Preset(labels) = FeatureId::DacFilter.value_kind() else {
+                unreachable!("DacFilter must be a Preset")
+            };
+
+            let original = selected;
+            for (index, &label) in labels.iter().enumerate() {
+                ui.radio_value(&mut selected, index, label);
+            }
+            if selected != original {
+                let _ = blaster.set_feature(FeatureId::DacFilter, Some(selected as f32));
+            }
+
+        });
+    });
+
 }

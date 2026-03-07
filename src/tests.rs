@@ -91,14 +91,13 @@ mod tests {
     #[test]
     fn paired_sliders_are_valid_feature_ids() {
         for &id in FeatureId::ALL {
-            if let Some(slider_id) = id.paired_slider() {
-                assert!(
-                    FeatureId::ALL.contains(&slider_id),
-                    "{:?} has paired slider {:?} which is not in ALL",
-                    id,
-                    slider_id
-                );
-            }
+            let Some(slider_id) = id.paired_slider() else { continue };
+            assert!(
+                FeatureId::ALL.contains(&slider_id),
+                "{:?} has paired slider {:?} which is not in ALL",
+                id,
+                slider_id
+            );
         }
     }
 

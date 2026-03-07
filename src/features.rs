@@ -51,8 +51,8 @@ pub enum FeatureId {
     Eq4kHz,
     Eq8kHz,
     Eq16kHz,
-    // Placeholders for future protocols
-    // DacFilter,
+    DacFilter,
+
     // GainConfig,
 }
 
@@ -91,6 +91,7 @@ impl FeatureId {
         Self::Eq4kHz,
         Self::Eq8kHz,
         Self::Eq16kHz,
+        Self::DacFilter,
     ];
 
     pub const SBX_TOGGLES: &[FeatureId] = &[
@@ -148,6 +149,7 @@ impl FeatureId {
             Self::BassLevel => "Bass Slider",
             Self::SurroundDistance => "Surround Distance",
             Self::EqToggle => "Equalizer",
+            Self::DacFilter => "DAC Filter",
             Self::EqPreAmp => "EQ Pre-Amp",
             Self::Eq31Hz => "EQ 31Hz",
             Self::Eq62Hz => "EQ 62Hz",
@@ -208,6 +210,14 @@ impl FeatureId {
             }
 
             Self::Output => ValueKind::Preset(&["Speakers", "Headphones"]),
+
+            Self::DacFilter => ValueKind::Preset(&[
+                "Fast Roll-off, Minimum Phase",
+                "Slow Roll-off, Minimum Phase",
+                "NOS (Non-Oversampling)",
+                "Fast Roll-off, Linear Phase",
+                "Slow Roll-off, Linear Phase",
+            ]),
         }
     }
 
@@ -246,7 +256,7 @@ impl FeatureId {
     /// Features that must be ON for this feature to work.
     pub fn dependencies(&self) -> &'static [FeatureId] {
         match self {
-            Self::SbxMaster | Self::ScoutMode | Self::Output => &[],
+            Self::SbxMaster | Self::ScoutMode | Self::Output | Self::DacFilter => &[],
 
             Self::SurroundToggle
             | Self::DialogPlusToggle
@@ -527,6 +537,12 @@ pub fn all_features() -> Vec<Feature> {
             value: Mutex::new(f32::NAN),
             getter: output_get,
             setter: output_set,
+        },
+        Feature {
+            id: FeatureId::DacFilter,
+            value: Mutex::new(f32::NAN),
+            getter: dac_filter_get,
+            setter: dac_filter_set,
         },
     ]
 }
@@ -863,6 +879,89 @@ fn output_set(feature: &Feature, value: f32) {
     payload[6] = 0x00;
     payload[7] = 0x00;
     payload[8] = 0x00;
+
+    DEVICE_CONNECTION
+        .get()
+        .expect("Device connection must be initialized")
+        .lock()
+        .unwrap()
+        .write(&payload)
+        .expect("Failed to send write to device");
+
+    read_ack();
+}
+
+// ─── DacFilter Getter/Setter (0x6c) ─────────────────────────────────────────
+//
+// Device byte 0x01–0x05 maps to zero-indexed float 0.0–4.0.
+// Read:  5a 6c 01 01  →  5a 6c 03 01 [filter] 00
+// Write: 5a 6c 03 00 [filter] 00
+
+fn dac_filter_get(feature: &Feature) -> f32 {
+    debug!("Querying DAC filter");
+
+    let mut payload = [0u8; 65];
+    payload[1] = 0x5a;
+    payload[2] = 0x6c;
+    payload[3] = 0x01;
+    payload[4] = 0x01;
+
+    DEVICE_CONNECTION
+        .get()
+        .expect("Device connection must be initialized")
+        .lock()
+        .unwrap()
+        .write(&payload)
+        .expect("Failed to send query to device");
+
+    for attempt in 0..MAX_READ_ATTEMPTS {
+        let Some(response) = read_packet() else {
+            error!(
+                "No response on attempt {}/{} for DAC filter",
+                attempt + 1,
+                MAX_READ_ATTEMPTS
+            );
+            continue;
+        };
+
+        // expected: 5a 6c 03 01 [filter] 00
+        if response[0] == 0x5a && response[1] == 0x6c {
+            let filter_byte = response[4];
+            let value = (filter_byte.saturating_sub(1)) as f32;
+            info!("Current DAC filter: 0x{:02x} (index {})", filter_byte, value);
+            *feature.value.lock().unwrap() = value;
+            return value;
+        }
+
+        debug!(
+            "Discarded stale packet on attempt {}: {:02x?}",
+            attempt + 1,
+            &response[..12]
+        );
+    }
+
+    error!(
+        "No matching response after {} attempts for DAC filter",
+        MAX_READ_ATTEMPTS
+    );
+    0.0
+}
+
+fn dac_filter_set(feature: &Feature, value: f32) {
+    let filter_byte = (value as u8).saturating_add(1).clamp(0x01, 0x05);
+
+    debug!(
+        "Setting DAC filter: index {} → byte 0x{:02x}",
+        value, filter_byte
+    );
+
+    let mut payload = [0u8; 65];
+    payload[1] = 0x5a;
+    payload[2] = 0x6c;
+    payload[3] = 0x03;
+    payload[4] = 0x00;
+    payload[5] = filter_byte;
+    payload[6] = 0x00;
 
     DEVICE_CONNECTION
         .get()
