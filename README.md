@@ -194,7 +194,7 @@ The initial versions of this project were based on the [soundblaster-x-g6-cli](h
 
 With v2 I can proudly say that almost all Code was written by me (In v1 the GUI was written by AI (and you could tell)), and AI only filled out match arms and enums for me. 
 I also use AI liberally to beautify anything user-facing (including this README and most other .md files).  
-Oh and the math for the EQ curve visualizer was also done by AI because I find it boring; I make computers do the math for me for a reason. 
+Oh and the math for the EQ curve visualizer was also done by AI. 
 
 ## License
 

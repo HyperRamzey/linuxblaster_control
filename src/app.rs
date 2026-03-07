@@ -366,9 +366,11 @@ fn autoeq_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
             if ui.button(RichText::new("Back")).clicked() {
                 *AUTOEQ_MODAL.lock().unwrap() = false;
             }
-            ui.heading(
-                RichText::new("Select AutoEq Profile").color(Color32::GRAY),
-            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.heading(
+                    RichText::new("Select AutoEq Profile").color(Color32::GRAY),
+                );
+            });
         });
         ui.separator();
 
@@ -383,9 +385,8 @@ fn autoeq_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
 
                 if let Some(map) = db.results {
                     for key in map.keys() {
-                        if let Some(score) = matcher.fuzzy_match(key, &search) {
-                            results.push((score, *key));
-                        }
+                        let Some(score) = matcher.fuzzy_match(key, &search) else { continue };
+                        results.push((score, *key));
                     }
                 }
 
@@ -413,105 +414,106 @@ fn autoeq_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
             }
 
             for name in results_cache.iter() {
-                if let Some(results) = db.results.and_then(|map| map.get(name))
-                {
-                    ui.collapsing(RichText::new(*name).strong(), |ui| {
-                        for result in results.iter() {
-                            ui.horizontal(|ui| {
-                                // metadata
-                                ui.vertical(|ui| {
-                                    ui.set_width(180.0);
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "By: {}",
-                                            result.tester
-                                        ))
-                                        .color(Color32::GRAY),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "Variant: {}",
-                                            result.variant.unwrap_or("")
-                                        ))
-                                        .color(Color32::GRAY),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "Test Device: {}",
-                                            result.test_device.unwrap_or("")
-                                        ))
-                                        .color(Color32::GRAY),
-                                    );
-                                });
-                                ui.separator();
+                let Some(results) = db.results.and_then(|map| map.get(name)) else { continue; };
 
-                                // eq curve
-                                let plot =
-                                    Plot::new(format!("eq_curve_{}_{}_{}_{}", 
-                                            name, 
-                                            result.tester, 
-                                            result.variant.unwrap_or(""), 
-                                            result.test_device.unwrap_or("")
-                                        ))
-                                        .x_grid_spacer(log_grid_spacer(10))
-                                        .x_axis_formatter(|x, _range| {
-                                            let freq = 10.0_f64.powf(x.value);
-                                            if freq >= 1000.0 {
-                                                format!("{} kHz", freq / 1000.0)
-                                            } else {
-                                                format!("{} Hz", freq)
-                                            }
-                                        })
-                                        .y_axis_min_width(40.0)
-                                        .show_grid(true)
-                                        .include_y(-12.0)
-                                        .include_y(12.0)
-                                        .include_x(20.0_f64.log10())
-                                        .include_x(16000.0_f64.log10())
-                                        .allow_scroll(false)
-                                        .allow_zoom(false)
-                                        .allow_drag(false)
-                                        .allow_axis_zoom_drag(false)
-                                        .allow_boxed_zoom(false)
-                                        .height(80.0)
-                                        .view_aspect(3.0);
-
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    plot.show(ui, |plot_ui| {
-                                        let points: PlotPoints = (0..=500).map(|i| {
-                                            let t = i as f64 / 500.0; 
-                                            let f = 20.0 * (20000.0 / 20.0_f64).powf(t);
-                                            
-                                            let mut total_y = 0.0; 
-                                            for (index, gain) in result.ten_band_eq.iter().enumerate() {
-                                                if let Some(&center_freq) = ISO_BANDS.get(index)
-                                                    && gain.abs() > 0.01 {
-                                                    total_y += calculate_peaking_eq_response(f, center_freq, *gain as f64, 1.41);
-                                                }
-                                            }
-
-                                            [f.log10(), total_y]
-                                        }).collect();
-
-                                        plot_ui.line(Line::new(format!("eq_curve_{}", name), points).width(2.0));
-                                    });
-                                    let apply_button = ui.button(RichText::new("Apply Profile"));
-                                    if apply_button.clicked() {
-                                        for (index, gain) in result.ten_band_eq.iter().enumerate() {
-                                            if gain.abs() > 0.01 {
-                                                let _ = blaster.set_feature(FeatureId::EQ_BANDS[index], Some(*gain));
-                                            }
+                ui.collapsing(RichText::new(*name).strong(), |ui| {
+                    for result in results.iter() {
+                        ui.horizontal(|ui| {
+                            // metadata
+                            ui.vertical(|ui| {
+                                ui.set_width(180.0);
+                                ui.label(
+                                    RichText::new(format!(
+                                        "By: {}",
+                                        result.tester
+                                    ))
+                                    .color(Color32::GRAY),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Variant: {}",
+                                        result.variant.unwrap_or("")
+                                    ))
+                                    .color(Color32::GRAY),
+                                );
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Test Device: {}",
+                                        result.test_device.unwrap_or("")
+                                    ))
+                                    .color(Color32::GRAY),
+                                );
+                                let apply_button = ui.button(RichText::new("Apply Profile"));
+                                if apply_button.clicked() {
+                                    for (index, gain) in result.ten_band_eq.iter().enumerate() {
+                                        if gain.abs() > 0.01 {
+                                            let _ = blaster.set_feature(FeatureId::EQ_BANDS[index], Some(*gain));
                                         }
-                                        let _ = blaster.set_feature(FeatureId::EqPreAmp, Some(result.preamp));
                                     }
-
-                                });
+                                    let _ = blaster.set_feature(FeatureId::EqPreAmp, Some(result.preamp));
+                                    *AUTOEQ_MODAL.lock().unwrap() = false;
+                                }
                             });
-                        }
-                    });
+                            ui.separator();
 
-                    ui.separator();
-                }
+                            // eq curve
+                            let plot =
+                                Plot::new(format!("eq_curve_{}_{}_{}_{}", 
+                                        name, 
+                                        result.tester, 
+                                        result.variant.unwrap_or(""), 
+                                        result.test_device.unwrap_or("")
+                                    ))
+                                    .x_grid_spacer(log_grid_spacer(10))
+                                    .x_axis_formatter(|x, _range| {
+                                        let freq = 10.0_f64.powf(x.value);
+                                        if freq >= 1000.0 {
+                                            format!("{} kHz", freq / 1000.0)
+                                        } else {
+                                            format!("{} Hz", freq)
+                                        }
+                                    })
+                                    .y_axis_min_width(40.0)
+                                    .show_grid(true)
+                                    .include_y(-12.0)
+                                    .include_y(12.0)
+                                    .include_x(20.0_f64.log10())
+                                    .include_x(16000.0_f64.log10())
+                                    .allow_scroll(false)
+                                    .allow_zoom(false)
+                                    .allow_drag(false)
+                                    .allow_axis_zoom_drag(false)
+                                    .allow_boxed_zoom(false)
+                                    .height(80.0)
+                                    .view_aspect(3.0);
+
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                plot.show(ui, |plot_ui| {
+                                    let points: PlotPoints = (0..=500).map(|i| {
+                                        let t = i as f64 / 500.0; 
+                                        let f = 20.0 * (20000.0 / 20.0_f64).powf(t);
+                                        
+                                        let mut total_y = 0.0; 
+                                        for (index, gain) in result.ten_band_eq.iter().enumerate() {
+                                            let Some(&center_freq) = ISO_BANDS.get(index) else { continue };
+                                            if gain.abs() <= 0.01 {
+                                                continue;
+                                            }
+                                            total_y += calculate_peaking_eq_response(f, center_freq, *gain as f64, 1.41);
+                                        }
+
+                                        [f.log10(), total_y]
+                                    }).collect();
+
+                                    plot_ui.line(Line::new(format!("eq_curve_{}", name), points).width(2.0));
+                                });
+
+                            });
+                        });
+                    }
+                });
+
+                ui.separator();
             }
         });
     });

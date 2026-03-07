@@ -39,7 +39,7 @@ log "Found '$CARD_NAME' as card $card_index, applying fixes..."
 
 # === THE CRITICAL FIX ===
 # Without this, the microphone simply doesn't work on Linux.
-amixer -c "$card_index" -q cset name='PCM Capture Source' 'External Mic' 2>/dev/null
+amixer -c "$card_index" -q cset numid=29 1 2>/dev/null
 
 # === Mute unused playback inputs (prevents hearing yourself / feedback) ===
 for input in 'External Mic' 'Line In' 'S/PDIF In'; do
