@@ -133,7 +133,7 @@ enum SbCommand {
     GetHardwareIdResponse      { hw_id: String },
     // 0x26
     GlobalProfileRequest,
-    GlobalProfileResponse      { sbx_master: bool, scout_mode: bool, eq_enable: bool },
+    GlobalProfileResponse      { sbx_master: bool, scout_mode: bool, voice_clarity: bool },
     GlobalProfileWrite         { feature: String, enabled: bool },
     // 0x2c
     OutputSelectReadRequest,
@@ -151,9 +151,10 @@ enum SbCommand {
     DirectModeUnsupported      { sub: String },
     // 0x3a
     Capabilities               { sub: String },
-    // 0x3c
-    GainConfigRequest,
-    GainConfigResponse         { gain: String },
+    // 0x3c (single control 0x02 = mic boost)
+    MicBoostReadRequest,
+    MicBoostReadResponse       { db: u8 },
+    MicBoostWrite              { db: u8 },
     // 0x6c
     DacFilterReadRequest,
     DacFilterReadResponse      { filter: String },
@@ -311,10 +312,13 @@ fn decode_sb(cmd: u8, len: usize, d: &[u8]) -> SbCommand {
             SbCommand::StatusResponse { features }
         }
 
-        // WriteSingleFeature: 5a 12 07 01 [family] [feature_id] 00 [f32_LE×4]
+        // WriteSingleFeature: 5a 12 07 01 [family] [feature_id] [f32_LE×4]
+        // NOTE: no padding byte between feature_id and f32 (LEN=7 = 01+family+id+f32×4).
+        // The response (0x11) has an extra 00 at d[4], so its f32 is at d[7..11],
+        // but the write f32 starts one byte earlier at d[6..10].
         0x12 if len == 7 => {
-            let feature = if d.len() >= 11 {
-                feature_raw(g(4), g(5), [g(7), g(8), g(9), g(10)])
+            let feature = if d.len() >= 10 {
+                feature_raw(g(4), g(5), [g(6), g(7), g(8), g(9)])
             } else {
                 FeatureEntry { family: "?".into(), name: "?".into(), value: None }
             };
@@ -361,7 +365,7 @@ fn decode_sb(cmd: u8, len: usize, d: &[u8]) -> SbCommand {
                 SbCommand::GlobalProfileResponse {
                     sbx_master: bitmask & 0x01 != 0,
                     scout_mode: bitmask & 0x02 != 0,
-                    eq_enable:  bitmask & 0x04 != 0,
+                    voice_clarity: bitmask & 0x04 != 0,
                 }
             }
             (0x07, _) => {
@@ -417,11 +421,14 @@ fn decode_sb(cmd: u8, len: usize, d: &[u8]) -> SbCommand {
         // Capabilities / RGB lighting — sub-command at d[3]
         0x3a => SbCommand::Capabilities { sub: hb(g(3)) },
 
-        // GainConfig: Send 5a 3c 02 01 00 → Recv 5a 3c 04 01 00 [gain] 00
+        // GainConfig / Mic Boost (control 0x02):
+        //   read:  5a 3c 02 01 00 → 5a 3c 04 01 00 02 [dB]
+        //   write: 5a 3c 04 00 00 02 [dB]
         // Both have d[3]=0x01; request has LEN=2, response has LEN=4 with gain at d[5]
-        0x3c => match len {
-            2 => SbCommand::GainConfigRequest,
-            4 => SbCommand::GainConfigResponse { gain: hb(g(5)) },
+        0x3c => match (len, g(3)) {
+            (2, 0x01) => SbCommand::MicBoostReadRequest,
+            (4, 0x01) => SbCommand::MicBoostReadResponse { db: g(6) },
+            (4, 0x00) => SbCommand::MicBoostWrite { db: g(6) },
             _ => SbCommand::Unknown { cmd: hb(0x3c), raw: tail(3) },
         },
 
@@ -467,10 +474,32 @@ fn feature_at(d: &[u8], off: usize) -> FeatureEntry {
 fn feature_raw(family: u8, id: u8, f32_bytes: [u8; 4]) -> FeatureEntry {
     let value = Some(f32::from_le_bytes(f32_bytes));
     let name = match family {
+        0x95 => mic_feature_name(id),
         0x96 => dsp_feature_name(id),
+        0x97 if id == 0x02 => "DecoderMode".to_string(),
         _    => format!("id_{}", hb(id)),
     };
     FeatureEntry { family: hb(family), name, value }
+}
+
+fn mic_feature_name(id: u8) -> String {
+    match id {
+        0x00 => "AcousticEchoCancel",
+        0x04 => "VoiceClarity",
+        0x05 => "NoiseReductionLevel",
+        0x13 => "MicEqToggle",
+        0x14 => "MicEqBand1",
+        0x15 => "MicEqBand2",
+        0x16 => "MicEqBand3",
+        0x17 => "MicEqBand4",
+        0x18 => "MicEqBand5",
+        0x19 => "MicEqBand6",
+        0x1a => "MicEqBand7",
+        0x1b => "MicEqBand8",
+        0x2c => "RecordingSmartVolume",
+        _    => return format!("Unknown_{}", hb(id)),
+    }
+    .to_string()
 }
 
 fn dsp_feature_name(id: u8) -> String {

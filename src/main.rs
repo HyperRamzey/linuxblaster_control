@@ -20,7 +20,9 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_resizable(true)
-            .with_inner_size(Vec2::new(1050.0, 600.0)),
+            .with_inner_size(Vec2::new(1050.0, 600.0))
+            // the two-column panes need at least this much room
+            .with_min_inner_size(Vec2::new(1050.0, 600.0)),
         // .with_inner_size()
         ..Default::default()
     };
