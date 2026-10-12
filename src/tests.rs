@@ -114,6 +114,9 @@ mod tests {
                     FeatureId::SbxMaster
                         | FeatureId::ScoutMode
                         | FeatureId::Output
+                        | FeatureId::DacFilter
+                        | FeatureId::VoiceClarityNoiseReduction
+                        | FeatureId::MicBoost
                 ),
                 "{:?} has no DSP address and is not a known non-DSP feature",
                 feature.id

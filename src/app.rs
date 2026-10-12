@@ -119,7 +119,7 @@ impl eframe::App for BlasterApp {
                     playback_pane(&self.0, ui);
                 }
                 "Recording" => {
-                    todo!();
+                    recording_pane(&self.0, ui);
                 }
                 _ => {
                     warn!("Unknown UI selected: {}", state);
@@ -562,7 +562,7 @@ fn playback_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
 
         columns[1].with_layout(Layout::top_down_justified(Align::TOP), |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Filter").color(Color32::GRAY));
+                ui.label(RichText::new("DAC Filter").color(Color32::GRAY));
             });
             ui.separator();
             
@@ -583,4 +583,20 @@ fn playback_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
         });
     });
 
+}
+
+fn recording_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
+    Grid::new("recording_grid").show(ui, |ui| {
+        // TODO: USBAUDIO: mic toggle & volume 
+        // mic boost level 
+        ui.end_row();
+        // voice clarity toggle 
+        ui.end_row();
+        // mic noise reduction & level 
+        ui.end_row();
+        // acoustic echo cancellation toggle
+        ui.end_row();
+        // smart volume toggle 
+        ui.end_row();
+    });
 }

@@ -311,10 +311,13 @@ fn decode_sb(cmd: u8, len: usize, d: &[u8]) -> SbCommand {
             SbCommand::StatusResponse { features }
         }
 
-        // WriteSingleFeature: 5a 12 07 01 [family] [feature_id] 00 [f32_LE×4]
+        // WriteSingleFeature: 5a 12 07 01 [family] [feature_id] [f32_LE×4]
+        // NOTE: no padding byte between feature_id and f32 (LEN=7 = 01+family+id+f32×4).
+        // The response (0x11) has an extra 00 at d[4], so its f32 is at d[7..11],
+        // but the write f32 starts one byte earlier at d[6..10].
         0x12 if len == 7 => {
-            let feature = if d.len() >= 11 {
-                feature_raw(g(4), g(5), [g(7), g(8), g(9), g(10)])
+            let feature = if d.len() >= 10 {
+                feature_raw(g(4), g(5), [g(6), g(7), g(8), g(9)])
             } else {
                 FeatureEntry { family: "?".into(), name: "?".into(), value: None }
             };
@@ -467,10 +470,31 @@ fn feature_at(d: &[u8], off: usize) -> FeatureEntry {
 fn feature_raw(family: u8, id: u8, f32_bytes: [u8; 4]) -> FeatureEntry {
     let value = Some(f32::from_le_bytes(f32_bytes));
     let name = match family {
+        0x95 => mic_feature_name(id),
         0x96 => dsp_feature_name(id),
         _    => format!("id_{}", hb(id)),
     };
     FeatureEntry { family: hb(family), name, value }
+}
+
+fn mic_feature_name(id: u8) -> String {
+    match id {
+        0x00 => "AcousticEchoCancel",
+        0x04 => "VoiceClarity",
+        0x05 => "NoiseReductionLevel",
+        0x13 => "MicEqToggle",
+        0x14 => "MicEqBand1",
+        0x15 => "MicEqBand2",
+        0x16 => "MicEqBand3",
+        0x17 => "MicEqBand4",
+        0x18 => "MicEqBand5",
+        0x19 => "MicEqBand6",
+        0x1a => "MicEqBand7",
+        0x1b => "MicEqBand8",
+        0x2c => "RecordingSmartVolume",
+        _    => return format!("Unknown_{}", hb(id)),
+    }
+    .to_string()
 }
 
 fn dsp_feature_name(id: u8) -> String {

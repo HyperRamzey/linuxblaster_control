@@ -247,8 +247,10 @@ See [Appendix A: Multi-Feature StatusResponse](#multi-feature-statusresponse) fo
 Write a value to a feature. Used for all features in families 0x95, 0x96, 0x97.
 
 ```
-Send: 5a 12 07 01 [family] [feature_id] 00 [f32_value_LE × 4 bytes]
+Send: 5a 12 07 01 [family] [feature_id] [f32_value_LE × 4 bytes]
 ```
+
+LEN=`0x07` = 7 payload bytes: `01 [family] [feature_id] [f32 × 4]`. There is **no padding byte** between `feature_id` and the f32. This differs from the StatusResponse, which has an extra `00` at d[4] and places the f32 at d[7..11].
 
 Device responds with:
 1. `0x02` ACK (immediate)
@@ -256,7 +258,7 @@ Device responds with:
 
 Example — set CrystalizerToggle to ON:
 ```
-Send: 5a 12 07 01 96 07 00 00 00 80 3f
+Send: 5a 12 07 01 96 07 00 00 80 3f
 Recv: 5a 02 0a 12 00 00 00 00 00 00 00 00 00    ← ACK
 Recv: 5a 11 08 01 00 96 07 00 00 80 3f           ← status push
 ```
@@ -323,7 +325,7 @@ SBX Master:  5a 26 05 07 01 00 [00|01] 00
 Scout Mode:  5a 26 05 07 02 00 [00|01] 00
 ```
 
-EQ Enable is written via feature write instead: `5a 12 07 01 96 09 00 [f32]`
+EQ Enable is written via feature write instead: `5a 12 07 01 96 09 [f32]`
 
 **Write format breakdown:**
 ```
@@ -421,6 +423,15 @@ Recv: 5a 3c 04 01 00 [gain] 00
 Observed: gain = `0x02`
 
 **UNKNOWN:** Valid gain values, what they map to (impedance levels? gain stages?).
+
+#### Read mic boost (sub 0x04)
+
+```
+Send: 5a 3c 04 01 00
+Recv: 5a 3c [len] 01 00 [dB_u32_LE] ...
+```
+
+Same pattern as headphone gain read; value at bytes 5–8 is u32 LE (0, 10, 20, 30).
 
 #### Write mic boost (sub 0x04)
 
@@ -561,25 +572,31 @@ Read/written via standard `0x11`/`0x12` commands.
 | ID     | Name                                | Type     | Values                                        |
 |--------|-------------------------------------|----------|-----------------------------------------------|
 | `0x00` | Acoustic Echo Cancellation          | Bool     | 0.0 / 1.0                                     |
-| `0x04` | Voice Clarity (master)              | Bool     | 0.0 / 1.0                                     |
-| `0x05` | Voice Clarity Noise Reduction Level | Float    | 0.0–1.0 (0%, 20%, 40%, 60%, 80%, 100%)        |
+| `0x04` | Voice Clarity / Noise Reduction     | Bool     | 0.0 / 1.0                                     |
+| `0x05` | Noise Reduction Level               | Float    | continuous 0.0–0.5 (device scale)             |
 | `0x13` | Mic EQ Enable                       | Bool     | 0.0 / 1.0                                     |
 | `0x14`–`0x1b` | Mic EQ Band 1–8 (suspected)    | dB (f32) | Per-band gain, ±12 dB typical. **Not confirmed.** |
+| `0x2c` | Recording Smart Volume              | Bool     | 0.0 / 1.0                                     |
 
-**Evidence for 0x14–0x1b as Mic EQ bands:** Packet captures show that when selecting a mic EQ preset, the software sends `5a 12 07 01 95 [14-1b] 00 [f32_LE]` with f32 dB values (e.g. `a0 c0` = -5.0, `80 c0` = -4.0, `40 40` ≈ 3.0). These are suspected to be EQ band writes. The EQ sliders (bands 0x14–0x1b as individual controls) are **suspected, not confirmed**.
+**`0x04` — Voice Clarity / Noise Reduction toggle:** The Windows SBX software labels this feature as both "Voice Clarity" (the section toggle) and "Noise Reduction" (the on/off control within that section). Both UI actions write to the same register: `0.0` = OFF, `1.0` = ON. Writing to this feature triggers an unsolicited `GlobalProfileResponse` (0x26) from the device reflecting the current global state.
 
-**Noise Reduction value encoding (f32):** The device uses a 0.0–0.5 f32 range for 0–100%. Formula: `percent = f32 × 200`. Observed values:
+**`0x05` — Noise Reduction Level:** A continuous float on the device's `0.0–0.5` scale. The app converts to/from a `0.0–1.0` UI scale by halving on write and doubling on read. The device accepts any value in range — it is not limited to preset steps. Confirmed observed values (device scale):
 
-| UI % | f32   | Hex (LE)     |
-|------|-------|---------------|
-| 0    | 0.0   | `00 00 00 00` |
-| 20   | 0.05  | `cd cc 4c 3d` |
-| 40   | 0.2   | `cd cc 4c 3e` |
-| 60   | 0.3   | `9a 99 99 3e` |
-| 80   | 0.4   | `cd cc cc 3e` |
-| 100  | 0.5   | `00 00 00 3f` |
+| Device f32 | UI % (approx) | Hex (LE)     |
+|------------|---------------|--------------|
+| 0.0        | 0%            | `00 00 00 00` |
+| 0.05       | 10%           | `cd cc 4c 3d` |
+| 0.11       | 22%           | `ae 47 e1 3d` |
+| 0.19       | 38%           | `5c 8f 42 3e` |
+| 0.2        | 40%           | `cd cc 4c 3e` |
+| 0.3        | 60%           | `9a 99 99 3e` |
+| 0.37       | 74%           | `a4 70 bd 3e` |
+| 0.4        | 80%           | `cd cc cc 3e` |
+| 0.5        | 100%          | `00 00 00 3f` |
 
-**Note:** The 20% value (0.05) does not follow a simple percent/100 scale — 0.05 × 200 = 10%, so either the encoding or the g6-cli capture labels are inconsistent. Use `percent = f32 × 200` for conversion.
+**Note:** The earlier observation that "20% maps to 0.05" is a label inconsistency in the g6-cli capture metadata, not a protocol quirk. The device stores the raw float and the UI scale is `device_f32 × 2.0`.
+
+**Evidence for 0x14–0x1b as Mic EQ bands:** Packet captures show that when selecting a mic EQ preset, the software sends `5a 12 07 01 95 [14-1b] [f32_LE × 4]` with f32 dB values (e.g. `00 00 a0 c0` = -5.0 dB, `00 00 80 c0` = -4.0 dB, `00 00 40 40` ≈ +3.0 dB). These are suspected to be EQ band writes. The EQ sliders (bands 0x14–0x1b as individual controls) are **suspected, not confirmed**.
 
 ### Mic EQ Presets
 
@@ -617,7 +634,7 @@ Parse bytes 7–10 as IEEE 754 f32 little-endian.
 ### Write any DSP feature value
 
 ```
-Send: 5a 12 07 01 [family] [feature_id] 00 [f32_LE × 4]
+Send: 5a 12 07 01 [family] [feature_id] [f32_LE × 4]
 Recv: 5a 02 0a 12 00 ...           ← ACK
 Recv: 5a 11 08 01 00 ...           ← unsolicited status push (optional to consume)
 ```
@@ -625,8 +642,8 @@ Recv: 5a 11 08 01 00 ...           ← unsolicited status push (optional to cons
 ### Toggle an SBX effect (e.g. Crystalizer)
 
 ```
-ON:  5a 12 07 01 96 07 00  00 00 80 3f    (1.0f)
-OFF: 5a 12 07 01 96 07 00  00 00 00 00    (0.0f)
+ON:  5a 12 07 01 96 07 00 00 80 3f    (1.0f)
+OFF: 5a 12 07 01 96 07 00 00 00 00    (0.0f)
 ```
 
 Same pattern for all toggles — just change the feature ID:
@@ -635,7 +652,7 @@ Same pattern for all toggles — just change the feature ID:
 ### Set an SBX effect level (e.g. Crystalizer Level)
 
 ```
-5a 12 07 01 96 08 00 [f32_LE]
+5a 12 07 01 96 08 [f32_LE]
 ```
 
 Value is 0.0–1.0 (percentage). Same for `0x01`=Surround, `0x03`=Dialog+, `0x05`=SmartVol, `0x19`=Bass.
@@ -643,7 +660,7 @@ Value is 0.0–1.0 (percentage). Same for `0x01`=Surround, `0x03`=Dialog+, `0x05
 ### Set SmartVolume Mode
 
 ```
-5a 12 07 01 96 06 00 [f32_LE]
+5a 12 07 01 96 06 [f32_LE]
 ```
 
 Values: `00 00 00 00` = Normal (0.0), `00 00 80 3f` = Loud (1.0), `00 00 00 40` = Night (2.0)
@@ -651,7 +668,7 @@ Values: `00 00 00 00` = Normal (0.0), `00 00 80 3f` = Loud (1.0), `00 00 00 40` 
 ### Set an EQ band (e.g. 1kHz to +2.5 dB)
 
 ```
-5a 12 07 01 96 10 00 00 00 20 40     (2.5f LE = 0x40200000)
+5a 12 07 01 96 10 00 00 20 40     (2.5f LE = 0x40200000)
 ```
 
 ### Query global state (SBX / Scout / EQ)

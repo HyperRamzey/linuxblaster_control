@@ -24,6 +24,9 @@ pub enum FeatureId {
     // OutputSelect (0x2c)
     Output,
 
+    // Dac Filter 0x02
+    DacFilter,
+
     // DSP 0x96 — SBX sub-features
     SurroundToggle,
     SurroundLevel,
@@ -51,9 +54,24 @@ pub enum FeatureId {
     Eq4kHz,
     Eq8kHz,
     Eq16kHz,
-    DacFilter,
 
-    // GainConfig,
+    // DSP 0x95 — Recording Pane
+    VoiceClarityToggle,
+    VoiceClarityNoiseReduction,
+    AcousticEchoCancellation,
+    RecordingSmartVolToggle,
+    MicEqToggle,
+    MicEqBand1,
+    MicEqBand2,
+    MicEqBand3,
+    MicEqBand4,
+    MicEqBand5,
+    MicEqBand6,
+    MicEqBand7,
+    MicEqBand8,
+
+    // GainConfig (0x3c)
+    MicBoost,
 }
 
 impl fmt::Display for FeatureId {
@@ -92,6 +110,20 @@ impl FeatureId {
         Self::Eq8kHz,
         Self::Eq16kHz,
         Self::DacFilter,
+        Self::AcousticEchoCancellation,
+        Self::VoiceClarityToggle,
+        Self::VoiceClarityNoiseReduction,
+        Self::MicEqToggle,
+        Self::MicEqBand1,
+        Self::MicEqBand2,
+        Self::MicEqBand3,
+        Self::MicEqBand4,
+        Self::MicEqBand5,
+        Self::MicEqBand6,
+        Self::MicEqBand7,
+        Self::MicEqBand8,
+        Self::MicBoost,
+        Self::RecordingSmartVolToggle,
     ];
 
     pub const SBX_TOGGLES: &[FeatureId] = &[
@@ -161,6 +193,20 @@ impl FeatureId {
             Self::Eq4kHz => "EQ 4kHz",
             Self::Eq8kHz => "EQ 8kHz",
             Self::Eq16kHz => "EQ 16kHz",
+            Self::AcousticEchoCancellation => "Acoustic Echo Cancellation",
+            Self::VoiceClarityToggle => "Voice Clarity",
+            Self::VoiceClarityNoiseReduction => "Voice Clarity Noise Reduction",
+            Self::MicEqToggle => "Mic EQ",
+            Self::MicEqBand1 => "Mic EQ Band 1",
+            Self::MicEqBand2 => "Mic EQ Band 2",
+            Self::MicEqBand3 => "Mic EQ Band 3",
+            Self::MicEqBand4 => "Mic EQ Band 4",
+            Self::MicEqBand5 => "Mic EQ Band 5",
+            Self::MicEqBand6 => "Mic EQ Band 6",
+            Self::MicEqBand7 => "Mic EQ Band 7",
+            Self::MicEqBand8 => "Mic EQ Band 8",
+            Self::MicBoost => "Mic Boost",
+            Self::RecordingSmartVolToggle => "Recording Smart Volume",
         }
     }
 
@@ -173,13 +219,18 @@ impl FeatureId {
             | Self::SmartVolToggle
             | Self::CrystalizerToggle
             | Self::BassToggle
-            | Self::EqToggle => ValueKind::Toggle,
+            | Self::EqToggle
+            | Self::AcousticEchoCancellation
+            | Self::VoiceClarityToggle
+            | Self::MicEqToggle
+            | Self::RecordingSmartVolToggle => ValueKind::Toggle,
 
             Self::SurroundLevel
             | Self::DialogPlusLevel
             | Self::SmartVolLevel
             | Self::CrystalizerLevel
-            | Self::BassLevel => ValueKind::Percentage,
+            | Self::BassLevel
+            | Self::VoiceClarityNoiseReduction => ValueKind::Percentage,
 
             Self::EqPreAmp => ValueKind::Ranged {
                 min: -6.0,
@@ -195,7 +246,15 @@ impl FeatureId {
             | Self::Eq2kHz
             | Self::Eq4kHz
             | Self::Eq8kHz
-            | Self::Eq16kHz => ValueKind::Ranged {
+            | Self::Eq16kHz
+            | Self::MicEqBand1
+            | Self::MicEqBand2
+            | Self::MicEqBand3
+            | Self::MicEqBand4
+            | Self::MicEqBand5
+            | Self::MicEqBand6
+            | Self::MicEqBand7
+            | Self::MicEqBand8 => ValueKind::Ranged {
                 min: -12.0,
                 max: 12.0,
             },
@@ -218,6 +277,10 @@ impl FeatureId {
                 "Fast Roll-off, Linear Phase",
                 "Slow Roll-off, Linear Phase",
             ]),
+
+            Self::MicBoost => {
+                ValueKind::Preset(&["0 dB", "10 dB", "20 dB", "30 dB"])
+            }
         }
     }
 
@@ -249,6 +312,18 @@ impl FeatureId {
             Self::SurroundDistance => Some((0x96, 0x17)),
             Self::BassToggle => Some((0x96, 0x18)),
             Self::BassLevel => Some((0x96, 0x19)),
+            Self::AcousticEchoCancellation => Some((0x95, 0x00)),
+            Self::VoiceClarityToggle => Some((0x95, 0x04)),
+            Self::MicEqToggle => Some((0x95, 0x13)),
+            Self::MicEqBand1 => Some((0x95, 0x14)),
+            Self::MicEqBand2 => Some((0x95, 0x15)),
+            Self::MicEqBand3 => Some((0x95, 0x16)),
+            Self::MicEqBand4 => Some((0x95, 0x17)),
+            Self::MicEqBand5 => Some((0x95, 0x18)),
+            Self::MicEqBand6 => Some((0x95, 0x19)),
+            Self::MicEqBand7 => Some((0x95, 0x1a)),
+            Self::MicEqBand8 => Some((0x95, 0x1b)),
+            Self::RecordingSmartVolToggle => Some((0x95, 0x2c)),
             _ => None,
         }
     }
@@ -256,7 +331,13 @@ impl FeatureId {
     /// Features that must be ON for this feature to work.
     pub fn dependencies(&self) -> &'static [FeatureId] {
         match self {
-            Self::SbxMaster | Self::ScoutMode | Self::Output | Self::DacFilter => &[],
+            Self::SbxMaster
+            | Self::ScoutMode
+            | Self::Output
+            | Self::DacFilter
+            | Self::AcousticEchoCancellation
+            | Self::MicBoost
+            | Self::RecordingSmartVolToggle => &[],
 
             Self::SurroundToggle
             | Self::DialogPlusToggle
@@ -288,6 +369,18 @@ impl FeatureId {
             | Self::Eq4kHz
             | Self::Eq8kHz
             | Self::Eq16kHz => &[Self::SbxMaster, Self::EqToggle],
+
+            Self::VoiceClarityNoiseReduction => &[Self::VoiceClarityToggle],
+            Self::VoiceClarityToggle => &[],
+            Self::MicEqToggle => &[],
+            Self::MicEqBand1
+            | Self::MicEqBand2
+            | Self::MicEqBand3
+            | Self::MicEqBand4
+            | Self::MicEqBand5
+            | Self::MicEqBand6
+            | Self::MicEqBand7
+            | Self::MicEqBand8 => &[Self::MicEqToggle],
         }
     }
 
@@ -340,6 +433,17 @@ impl FeatureId {
                 Self::Eq8kHz,
                 Self::Eq16kHz,
             ],
+            Self::VoiceClarityToggle => &[Self::VoiceClarityNoiseReduction],
+            Self::MicEqToggle => &[
+                Self::MicEqBand1,
+                Self::MicEqBand2,
+                Self::MicEqBand3,
+                Self::MicEqBand4,
+                Self::MicEqBand5,
+                Self::MicEqBand6,
+                Self::MicEqBand7,
+                Self::MicEqBand8,
+            ],
             _ => &[],
         }
     }
@@ -352,6 +456,7 @@ impl FeatureId {
             Self::SmartVolToggle => Some(Self::SmartVolLevel),
             Self::CrystalizerToggle => Some(Self::CrystalizerLevel),
             Self::BassToggle => Some(Self::BassLevel),
+            Self::VoiceClarityToggle => Some(Self::VoiceClarityNoiseReduction),
             _ => None,
         }
     }
@@ -363,6 +468,7 @@ impl FeatureId {
             Self::SmartVolLevel => Some(Self::SmartVolToggle),
             Self::CrystalizerLevel => Some(Self::CrystalizerToggle),
             Self::BassLevel => Some(Self::BassToggle),
+            Self::VoiceClarityNoiseReduction => Some(Self::VoiceClarityToggle),
             _ => None,
         }
     }
@@ -544,6 +650,31 @@ pub fn all_features() -> Vec<Feature> {
             getter: dac_filter_get,
             setter: dac_filter_set,
         },
+        // DSP 0x95 — Recording Pane
+        Feature::dsp(FeatureId::AcousticEchoCancellation),
+        Feature::dsp(FeatureId::VoiceClarityToggle),
+        Feature {
+            id: FeatureId::VoiceClarityNoiseReduction,
+            value: Mutex::new(f32::NAN),
+            getter: recording_noise_reduction_get,
+            setter: recording_noise_reduction_set,
+        },
+        Feature::dsp(FeatureId::MicEqToggle),
+        Feature::dsp(FeatureId::MicEqBand1),
+        Feature::dsp(FeatureId::MicEqBand2),
+        Feature::dsp(FeatureId::MicEqBand3),
+        Feature::dsp(FeatureId::MicEqBand4),
+        Feature::dsp(FeatureId::MicEqBand5),
+        Feature::dsp(FeatureId::MicEqBand6),
+        Feature::dsp(FeatureId::MicEqBand7),
+        Feature::dsp(FeatureId::MicEqBand8),
+        Feature::dsp(FeatureId::RecordingSmartVolToggle),
+        Feature {
+            id: FeatureId::MicBoost,
+            value: Mutex::new(f32::NAN),
+            getter: gain_config_mic_boost_get,
+            setter: gain_config_mic_boost_set,
+        },
     ]
 }
 
@@ -695,6 +826,111 @@ fn dsp_set(feature: &Feature, value: f32) {
         .unwrap()
         .write(&payload)
         .expect("Failed to send Write to Device");
+
+    read_ack();
+}
+
+// ─── Recording Noise Reduction (0x95:0x05, custom 0.0–0.5 ↔ 0.0–1.0) ────────
+
+fn recording_noise_reduction_get(feature: &Feature) -> f32 {
+    const FAMILY: u8 = 0x95;
+    const FEATURE_ID: u8 = 0x05;
+
+    debug!(
+        "Querying recording noise reduction (0x{:02x}:0x{:02x})",
+        FAMILY, FEATURE_ID
+    );
+
+    let mut payload = [0u8; 65];
+    payload[1] = 0x5a;
+    payload[2] = 0x11;
+    payload[3] = 0x03;
+    payload[4] = 0x01;
+    payload[5] = FAMILY;
+    payload[6] = FEATURE_ID;
+
+    DEVICE_CONNECTION
+        .get()
+        .expect("Device connection must be initialized")
+        .lock()
+        .unwrap()
+        .write(&payload)
+        .expect("Failed to send query to device");
+
+    for attempt in 0..MAX_READ_ATTEMPTS {
+        let Some(response) = read_packet() else {
+            error!(
+                "No response on attempt {}/{} for Voice Clarity Noise Reduction",
+                attempt + 1,
+                MAX_READ_ATTEMPTS
+            );
+            continue;
+        };
+
+        if response[0] == 0x5a
+            && response[1] == 0x11
+            && response[5] == FAMILY
+            && response[6] == FEATURE_ID
+        {
+            let device_f32 = f32::from_le_bytes(
+                response[7..11]
+                    .try_into()
+                    .expect("Failed to parse f32 from response bytes"),
+            );
+            // Device stores 0.0–0.5; convert to 0.0–1.0 for UI
+            let value = device_f32 * 2.0;
+            debug!(
+                "Read Voice Clarity Noise Reduction = {} (device: {})",
+                value, device_f32
+            );
+            *feature.value.lock().unwrap() = value;
+            return value;
+        }
+
+        debug!(
+            "Discarded stale packet on attempt {}: {:02x?}",
+            attempt + 1,
+            &response[..12]
+        );
+    }
+
+    error!(
+        "No matching response after {} attempts for Voice Clarity Noise Reduction",
+        MAX_READ_ATTEMPTS
+    );
+    0.0
+}
+
+fn recording_noise_reduction_set(feature: &Feature, value: f32) {
+    const FAMILY: u8 = 0x95;
+    const FEATURE_ID: u8 = 0x05;
+
+    // UI sends 0.0–1.0; convert to 0.0–0.5 for device
+    let device_f32 = value / 2.0;
+
+    debug!(
+        "Writing Voice Clarity Noise Reduction = {} (device: {})",
+        value, device_f32
+    );
+
+    let value_bytes = device_f32.to_le_bytes();
+
+    let mut payload = [0u8; 65];
+    payload[1] = 0x5a;
+    payload[2] = 0x12;
+    payload[3] = 0x07;
+    payload[4] = 0x01;
+    payload[5] = FAMILY;
+    payload[6] = FEATURE_ID;
+    payload[7..11].copy_from_slice(&value_bytes);
+
+    DEVICE_CONNECTION
+        .get()
+        .expect("Device connection must be initialized")
+        .lock()
+        .unwrap()
+        .write(&payload)
+        .expect("Failed to send write to device");
 
     read_ack();
 }
@@ -928,7 +1164,10 @@ fn dac_filter_get(feature: &Feature) -> f32 {
         if response[0] == 0x5a && response[1] == 0x6c {
             let filter_byte = response[4];
             let value = (filter_byte.saturating_sub(1)) as f32;
-            info!("Current DAC filter: 0x{:02x} (index {})", filter_byte, value);
+            info!(
+                "Current DAC filter: 0x{:02x} (index {})",
+                filter_byte, value
+            );
             *feature.value.lock().unwrap() = value;
             return value;
         }
@@ -962,6 +1201,94 @@ fn dac_filter_set(feature: &Feature, value: f32) {
     payload[4] = 0x00;
     payload[5] = filter_byte;
     payload[6] = 0x00;
+
+    DEVICE_CONNECTION
+        .get()
+        .expect("Device connection must be initialized")
+        .lock()
+        .unwrap()
+        .write(&payload)
+        .expect("Failed to send write to device");
+
+    read_ack();
+}
+
+// ─── GainConfig Mic Boost (0x3c sub 0x04) ───────────────────────────────────
+//
+// Read:  5a 3c 04 01 00  →  5a 3c [len] 01 00 [dB_u32_LE] ...
+// Write: 5a 3c 04 00 00 02 [dB_u32_LE] ...
+// Preset indices 0–3 map to 0, 10, 20, 30 dB.
+
+fn gain_config_mic_boost_get(feature: &Feature) -> f32 {
+    debug!("Querying mic boost");
+
+    let mut payload = [0u8; 65];
+    payload[1] = 0x5a;
+    payload[2] = 0x3c;
+    payload[3] = 0x04;
+    payload[4] = 0x01;
+    payload[5] = 0x00;
+
+    DEVICE_CONNECTION
+        .get()
+        .expect("Device connection must be initialized")
+        .lock()
+        .unwrap()
+        .write(&payload)
+        .expect("Failed to send query to device");
+
+    for attempt in 0..MAX_READ_ATTEMPTS {
+        let Some(response) = read_packet() else {
+            error!(
+                "No response on attempt {}/{} for Mic Boost",
+                attempt + 1,
+                MAX_READ_ATTEMPTS
+            );
+            continue;
+        };
+
+        if response[0] == 0x5a && response[1] == 0x3c && response[3] == 0x01 {
+            let db = u32::from_le_bytes(
+                response[5..9]
+                    .try_into()
+                    .expect("Failed to parse u32 from response bytes"),
+            );
+            let index = (db / 10) as f32;
+            let index = index.clamp(0.0, 3.0);
+            debug!("Read Mic Boost = {} dB (index {})", db, index);
+            *feature.value.lock().unwrap() = index;
+            return index;
+        }
+
+        debug!(
+            "Discarded stale packet on attempt {}: {:02x?}",
+            attempt + 1,
+            &response[..12]
+        );
+    }
+
+    error!(
+        "No matching response after {} attempts for Mic Boost",
+        MAX_READ_ATTEMPTS
+    );
+    0.0
+}
+
+fn gain_config_mic_boost_set(feature: &Feature, value: f32) {
+    let index = value.clamp(0.0, 3.0);
+    let db = (index as u32) * 10;
+    let value_bytes = db.to_le_bytes();
+
+    debug!("Setting Mic Boost: index {} → {} dB", index, db);
+
+    let mut payload = [0u8; 65];
+    payload[1] = 0x5a;
+    payload[2] = 0x3c;
+    payload[3] = 0x04;
+    payload[4] = 0x00;
+    payload[5] = 0x00;
+    payload[6] = 0x02;
+    payload[7..11].copy_from_slice(&value_bytes);
 
     DEVICE_CONNECTION
         .get()

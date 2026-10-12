@@ -29,6 +29,8 @@ Do note tho: Profile Loading is currently still a little buggy when a Slider was
 		- 10-band EQ
 - **Playback**
 	- Output Toggle 
+	- Output Select 
+  - Filter
 - **Scout Mode** 
 
 ## Not-Yet-Implemented Features
@@ -36,11 +38,8 @@ Do note tho: Profile Loading is currently still a little buggy when a Slider was
 - **SBX** 
   - Smart Volume Sub-Features
     - Night Mode & Loud Mode
-  - Equalizer Sub-Features 
-    - SBC Eq Presets 
 - **Playback**
   - Direct Mode (not planned) 
-  - Filter
   - Audio Quality 
 - **Recording**
   - _Everything_
