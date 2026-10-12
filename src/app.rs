@@ -700,7 +700,8 @@ fn preset_row(blaster: &BlasterXG6, ui: &mut egui::Ui, id: FeatureId, label: &st
     let current = blaster.feature(id).value();
     let current_label = labels.get(current as usize).filter(|_| !current.is_nan());
 
-    ui.vertical_centered_justified(|ui| {
+    // not justified: a wrapped label would get stretched letter spacing
+    ui.vertical_centered(|ui| {
         ui.label(RichText::new(label).color(Color32::GRAY));
     });
     ui.label("");

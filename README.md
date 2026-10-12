@@ -5,12 +5,103 @@ A native Linux GUI application to control the **Creative Sound BlasterX G6** USB
 
 ![Screenshot](LinuxblasterControl.png)
 
-## v2.1 - now with State Reading 
+## Installation
 
-The Software can now read out the State of the Device, instead of having to track it internally.  
-Note that the G6 has two internal settings profiles, one for Headphones and one for Speakers. The App will auto-refresh its state from device on Output switching.  
+You don't need to know anything about programming to use this. Download one file, install it like any other app, and you're done.
 
-Changes made on the device itself (e.g. the SBX and Scout Mode buttons) and to the hardware mixer (e.g. the volume knob) are picked up while the app is running.
+### 1. Download the right file
+
+Go to the **[latest release](https://github.com/RizeCrime/linuxblaster_control/releases/latest)** and download **one** file from the *Assets* list:
+
+| Your Linux                                                     | Download the file ending in |
+|----------------------------------------------------------------|-----------------------------|
+| **Ubuntu, Linux Mint, Pop!_OS, Zorin OS, elementary OS, Debian** | `_amd64.deb`                |
+| **Fedora, Nobara, openSUSE**                                   | `.x86_64.rpm`               |
+| **Anything else** (Arch, Manjaro, EndeavourOS, Bazzite, …), or if you'd rather not install anything | `-x86_64.AppImage` |
+| **NixOS**                                                      | see [NixOS](#nixos) below   |
+
+> [!TIP]
+> Almost every desktop PC and laptop needs the `amd64` / `x86_64` files.
+> The `arm64` / `aarch64` files are only for ARM computers, such as a Raspberry Pi or a Snapdragon laptop.
+
+### 2. Install it
+
+**`.deb` (Ubuntu, Mint, …):** double-click the file and click *Install*.
+If double-clicking doesn't work, open a terminal in your Downloads folder and run:
+```bash
+sudo apt install ./linuxblaster-control_*_amd64.deb
+```
+
+**`.rpm` (Fedora, openSUSE):** double-click the file and click *Install*, or run:
+```bash
+sudo dnf install ./linuxblaster-control-*.x86_64.rpm      # Fedora
+sudo zypper install ./linuxblaster-control-*.x86_64.rpm   # openSUSE
+```
+
+**AppImage:** no installation needed. Right-click the file → *Properties* → *Permissions* → enable *Allow executing file as program* (the exact wording depends on your desktop). Then double-click it.
+
+### 3. Start it
+
+Plug in your G6 and open **Linuxblaster Control** from your application menu (or double-click the AppImage).
+
+The first time you start the AppImage, the app will ask to **allow access** to the G6. That's a one-time setup that lets your user account control the device. Click *Allow access* and enter your password. The `.deb` and `.rpm` packages do this automatically during installation.
+
+### Uninstall
+
+- `.deb`: `sudo apt remove linuxblaster-control`
+- `.rpm`: `sudo dnf remove linuxblaster-control` (or `sudo zypper remove linuxblaster-control`)
+- AppImage: delete the file. To also remove the access rule: `sudo rm /etc/udev/rules.d/70-linuxblaster-control.rules`
+
+Your saved profiles stay in `~/.local/share/linuxblaster/profiles/`.
+
+### NixOS
+
+Add the flake to your configuration; this installs the app (with menu entry) and the access rule:
+
+```nix
+{
+  inputs.linuxblaster_control.url = "github:RizeCrime/linuxblaster_control";
+
+  outputs = { self, nixpkgs, linuxblaster_control, ... }: {
+    nixosConfigurations.yourhostname = nixpkgs.lib.nixosSystem {
+      modules = [
+        linuxblaster_control.nixosModules.default
+        {
+          hardware.soundblaster-g6.enable = true;
+        }
+      ];
+    };
+  };
+}
+```
+
+Or try it without installing: `nix run github:RizeCrime/linuxblaster_control`
+
+## Troubleshooting
+
+**"No Sound BlasterX G6 found"**
+Make sure the G6 is connected with a USB *data* cable (not a charge-only cable) and switched on. The app connects by itself as soon as the G6 shows up.
+
+**"Access is not allowed yet", even after clicking *Allow access***
+Unplug the G6 and plug it back in, then click *Try again*.
+
+**The AppImage doesn't start when double-clicked**
+Check that it's allowed to run (see step 2). On some systems AppImages also need FUSE: install `libfuse2` (Ubuntu 22.04, Debian) or `libfuse2t64` (Ubuntu 24.04 and newer), or use the `.deb`/`.rpm` instead.
+
+**My microphone isn't picked up**
+Open *Mixer* → *Recording Source* and select **External Mic**. (The G6 starts on *Line In* on Linux.)
+
+**My settings changed when I switched between Speakers and Headphones**
+That's how the G6 works: it keeps a separate set of settings for each output.
+
+**Something else is wrong**
+Start the app from a terminal with `linuxblaster_control` (or `./Linuxblaster_Control-*.AppImage`) and [open an issue](https://github.com/RizeCrime/linuxblaster_control/issues) with what it prints.
+
+## About
+
+The app reads the current state from the G6 itself, so it always shows what the device is actually set to.
+The G6 has two internal settings profiles, one for Headphones and one for Speakers; the app refreshes everything when you switch the output.
+Changes made on the device itself (e.g. the SBX and Scout Mode buttons) and to the hardware mixer (e.g. the volume knob) show up while the app is running.
 
 ## Supported Features
 
@@ -59,107 +150,37 @@ Changes made on the device itself (e.g. the SBX and Scout Mode buttons) and to t
 
 The Mixer (and the volume/monitoring sliders in Recording) are the G6's own hardware controls, defined by the USB Audio Class standard. They're changed through ALSA, which only forwards them to the device, the same way Windows does. Nothing is processed in software, so recordings stay exactly as the hardware produces them.
 
-## Presets
+## Profiles
 
-Presets are stored as JSON files in `~/.local/share/linuxblaster/presets/`. 
-Presets from before v2.1 will have to be remade, the old format is no longer compatible. 
+Profiles are stored as JSON files in `~/.local/share/linuxblaster/profiles/`.
+A profile applies to the output that is currently active (Speakers or Headphones).
+Profiles from before v2.1 will have to be remade, the old format is no longer compatible.
 
 > [!IMPORTANT]
-> The preset format is custom to this application and is **not compatible** with official Creative Sound Blaster Command profiles (.json or .xml) from Windows.
+> The profile format is custom to this application and is **not compatible** with official Creative Sound Blaster Command profiles (.json or .xml) from Windows.
 
-## Requirements
-
-- Linux (tested on x86_64)
-- Sound Blaster X G6 connected via USB
-- udev rules for HID access (see below)
-
-The device is accessed through the kernel's hidraw interface, so starting the app no longer resets the USB device (which used to interrupt audio for a moment). A reset is only done as a fallback if the device doesn't respond.
-
-### udev Rules
-
-To access the device without root privileges, create a udev rule:
-
-``` js (not actually js, just makes for a good highlighting)
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="041e", ATTRS{idProduct}=="3256", MODE="0666"
-```
-
-You may need to unplug and replug the device after adding the rule.
-
-## Installation
-
-### Nix
-
-Add to your NixOS configuration:
-
-```nix
-{
-  inputs.linuxblaster_control.url = "github:RizeCrime/linuxblaster_control";
-
-  outputs = { self, nixpkgs, linuxblaster_control, ... }: {
-    nixosConfigurations.yourhostname = nixpkgs.lib.nixosSystem {
-      modules = [
-        linuxblaster_control.nixosModules.default
-        {
-          hardware.soundblaster-g6.enable = true;
-        }
-      ];
-    };
-  };
-}
-```
-
-or 
-```bash
-# Run without installing
-nix run github:RizeCrime/linuxblaster_control
-
-# Install to user profile
-nix profile install github:RizeCrime/linuxblaster_control
-
-# Build locally
-git clone https://github.com/RizeCrime/linuxblaster_control.git
-cd linuxblaster_control
-nix build
-```
+## For Developers
 
 ### Building from Source
 
+You need a Rust toolchain and these development packages:
+
+| Distro          | Packages                                    |
+|-----------------|---------------------------------------------|
+| Debian / Ubuntu | `pkg-config libudev-dev libasound2-dev`     |
+| Fedora          | `pkgconf systemd-devel alsa-lib-devel`      |
+| Arch            | `pkgconf systemd-libs alsa-lib`             |
+
 ```bash
-# Clone the repository
 git clone https://github.com/RizeCrime/linuxblaster_control.git
 cd linuxblaster_control
-
-# Build release binary
 cargo build --release
-
-# Run
 ./target/release/linuxblaster_control
 ```
 
-### System Dependencies
+Without the packages, you'll also need the udev rule for access to the device: copy [`packaging/70-linuxblaster-control.rules`](packaging/70-linuxblaster-control.rules) to `/etc/udev/rules.d/` (or use the *Allow access* button in the app).
 
-You will need the following packages at a minimum:
-- hidapi 
-- libusb1 (libusb1-devel)
-- udev (libudev-devel)
-- alsa-lib (alsa-lib-devel / libasound2-dev)
-
-### Nix Development Shell
-
-A `flake.nix` is provided for Nix users who want to develop:
-
-```bash
-nix develop  # Enter development shell with all dependencies
-cargo build --release
-```
-
-## Usage
-
-Simply run the application while the Sound Blaster X G6 is connected:
-
-```bash
-./linuxblaster_control
-```
+The device is accessed through the kernel's hidraw interface, so starting the app doesn't reset the USB device (which would interrupt audio for a moment). A reset is only done as a fallback if the device doesn't respond.
 
 To print the current device state without the GUI (read-only):
 
@@ -167,8 +188,17 @@ To print the current device state without the GUI (read-only):
 cargo run --example dump_state
 ```
 
-If the device is not detected, the application won't start. 
-In that case, Launch it from a cli and check the logs (if I configured them correctly, which I'm not too sure about). 
+### Nix
+
+```bash
+nix develop   # development shell with all dependencies
+nix build     # build the package
+```
+
+### Release Packages
+
+[`packaging/build-release.sh`](packaging/build-release.sh) builds the `.tar.gz`, `.deb`, `.rpm` and AppImage for the current architecture into `dist/`.
+On GitHub, the [Release workflow](.github/workflows/release.yml) runs it for x86_64 and aarch64 whenever a release is published and attaches the files to the release. The package version is taken from the release tag.
 
 ## ⚠️ Development Status
 

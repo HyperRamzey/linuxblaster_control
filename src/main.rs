@@ -10,8 +10,18 @@ mod app;
 use app::Launcher;
 
 fn main() -> eframe::Result<()> {
+    // RUST_LOG overrides this, e.g. RUST_LOG=debug linuxblaster_control
+    let default_level = if cfg!(debug_assertions) {
+        Level::DEBUG
+    } else {
+        Level::INFO
+    };
     tracing_subscriber::fmt()
-        .with_max_level(Level::DEBUG)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(default_level.into())
+                .from_env_lossy(),
+        )
         .init();
 
     let app = Launcher::new();
