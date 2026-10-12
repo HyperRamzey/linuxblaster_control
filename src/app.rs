@@ -638,6 +638,7 @@ fn toggle_slider_row(
         .inner;
     let drag_value =
         ui.add_enabled(slider_available, drag_value!(&mut slider_value));
+    fit_slider_to_column(ui);
     let slider = ui.add_enabled(
         slider_available,
         slider!(&mut slider_value, vertical = false),
@@ -661,6 +662,18 @@ fn toggle_slider_row(
     }
 
     (drag_value, slider)
+}
+
+/// Sliders have a fixed default width, which overflows into the neighboring
+/// column when the labels in front of them are wide. Call this right before
+/// adding a slider as the last cell of a grid row, so it takes exactly the
+/// width that's left in its column.
+fn fit_slider_to_column(ui: &mut egui::Ui) {
+    // inside a grid cell, `available_width()` is the remembered column width,
+    // so measure up to the right edge of the surrounding column instead
+    let remaining = ui.max_rect().right() - ui.cursor().min.x;
+    let default_width = egui::Spacing::default().slider_width;
+    ui.spacing_mut().slider_width = remaining.clamp(40.0, default_width);
 }
 
 /// Grid row: a single toggle button.
@@ -688,8 +701,10 @@ fn preset_row(blaster: &BlasterXG6, ui: &mut egui::Ui, id: FeatureId, label: &st
         ui.label(RichText::new(label).color(Color32::GRAY));
     });
     ui.label("");
+    // like fit_slider_to_column(): stay inside the surrounding column
+    let remaining = ui.max_rect().right() - ui.cursor().min.x;
     egui::ComboBox::from_id_salt(id)
-        .width(ui.available_width())
+        .width(remaining.clamp(60.0, 150.0))
         .selected_text(current_label.copied().unwrap_or("Unknown"))
         .show_ui(ui, |ui| {
             for (index, &name) in labels.iter().enumerate() {
@@ -729,8 +744,6 @@ fn section_header(ui: &mut egui::Ui, title: &str) {
 fn recording_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
     ui.columns(2, |columns| {
         columns[0].with_layout(Layout::top_down_justified(Align::TOP), |ui| {
-            // the toggle labels here are wider than in the SBX pane
-            ui.spacing_mut().slider_width = 110.0;
             section_header(ui, "Microphone");
 
             Grid::new("recording_mic_grid").show(ui, |ui| {
@@ -848,6 +861,7 @@ fn mic_eq(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                 step = 0.5,
                 range = -12.0..=12.0
             ));
+            fit_slider_to_column(ui);
             let slider = ui.add(slider!(
                 &mut value,
                 vertical = false,
