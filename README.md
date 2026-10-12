@@ -10,50 +10,54 @@ A native Linux GUI application to control the **Creative Sound BlasterX G6** USB
 The Software can now read out the State of the Device, instead of having to track it internally.  
 Note that the G6 has two internal settings profiles, one for Headphones and one for Speakers. The App will auto-refresh its state from device on Output switching.  
 
-Do note tho: Profile Loading is currently still a little buggy when a Slider was saved with a non-zero Value and its corresponding Toggle turned off. 
+Changes made on the device itself (e.g. the SBX and Scout Mode buttons) and to the hardware mixer (e.g. the volume knob) are picked up while the app is running.
 
 ## Supported Features
 
 - **State Reading**
 - **Profiles**
-	- Saving & Loading (mostly working)
+	- Saving & Loading
 	- Profile Save Location
 - **SBX**
 	- Surround Sound
 	- Dialog+
-	- Smart Volume 
+	- Smart Volume (incl. Night & Loud Mode)
 	- Crystalizer 
 	- Bass 
 	- Equalizer 
 		- PreAmp
 		- 10-band EQ
+		- AutoEq Profiles
 - **Playback**
-	- Output Toggle 
 	- Output Select 
-  - Filter
+	- DAC Filter
+- **Recording**
+	- Mic Recording Volume & Monitoring
+	- Mic Boost
+	- Voice Clarity: Noise Reduction, Acoustic Echo Cancellation, Smart Volume
+	- Mic EQ (Presets & individual Bands)
+- **Decoder**
+	- Normal, Full, and Night
+- **Mixer**
+	- Playback, Monitoring, and Recording Levels
+	- Recording Source
+- **Lighting**
+	- On/Off & Color
 - **Scout Mode** 
 
-## Not-Yet-Implemented Features
+## Not-Implemented Features
 
-- **SBX** 
-  - Smart Volume Sub-Features
-    - Night Mode & Loud Mode
 - **Playback**
   - Direct Mode (not planned) 
-  - Audio Quality 
-- **Recording**
-  - _Everything_
-- **Decoder** 
-  - "Normal", "Full", and "Night" Selection
-- **Mixer** 
-  - Output
-    - Speakers 
-  - Monitoring 
-    - _Everything_ 
-  - Recording
-    - _Everything_ 
+  - Speaker/Headphone Channel Configuration (Stereo/5.1/7.1)
 - **Lighting**
-  - _Everything_
+  - Effects other than a static color (no captures yet)
+
+**Audio Quality** (bit depth / sample rate) is not a setting of the device: whatever plays or records audio picks the format for each stream (on Linux that's usually PipeWire). Configure it there, e.g. with PipeWire's `default.clock.allowed-rates`.
+
+### About the Mixer
+
+The Mixer (and the volume/monitoring sliders in Recording) are the G6's own hardware controls, defined by the USB Audio Class standard. They're changed through ALSA, which only forwards them to the device, the same way Windows does. Nothing is processed in software, so recordings stay exactly as the hardware produces them.
 
 ## Presets
 
@@ -68,6 +72,8 @@ Presets from before v2.1 will have to be remade, the old format is no longer com
 - Linux (tested on x86_64)
 - Sound Blaster X G6 connected via USB
 - udev rules for HID access (see below)
+
+The device is accessed through the kernel's hidraw interface, so starting the app no longer resets the USB device (which used to interrupt audio for a moment). A reset is only done as a fallback if the device doesn't respond.
 
 ### udev Rules
 
@@ -135,7 +141,8 @@ cargo build --release
 You will need the following packages at a minimum:
 - hidapi 
 - libusb1 (libusb1-devel)
-- udev
+- udev (libudev-devel)
+- alsa-lib (alsa-lib-devel / libasound2-dev)
 
 ### Nix Development Shell
 
@@ -151,7 +158,13 @@ cargo build --release
 Simply run the application while the Sound Blaster X G6 is connected:
 
 ```bash
-./linuxblaster_command
+./linuxblaster_control
+```
+
+To print the current device state without the GUI (read-only):
+
+```bash
+cargo run --example dump_state
 ```
 
 If the device is not detected, the application won't start. 
