@@ -27,6 +27,11 @@ fn with_selem<T>(
     action(&selem).map_err(|error| format!("'{}': {}", element, error))
 }
 
+/// Whether the G6's ALSA card is present at all.
+pub fn is_available() -> bool {
+    Mixer::new(CARD, false).is_ok()
+}
+
 fn channel() -> SelemChannelId {
     SelemChannelId::FrontLeft
 }

@@ -123,6 +123,11 @@ impl BlasterXG6 {
     /// Re-reads only the ALSA mixer features.
     /// They can change outside of this app (volume knob, pavucontrol, ...).
     pub fn read_mixer_state(&self) {
+        // don't log an error per control every second if the card is missing
+        if !mixer::is_available() {
+            debug!("ALSA card not available, skipping mixer refresh");
+            return;
+        }
         for feature in &self.features {
             if feature.id.alsa_element().is_some() {
                 feature.read_from_device();

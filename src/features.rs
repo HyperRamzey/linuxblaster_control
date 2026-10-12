@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use serde::de::Error;
 use serde::{Deserialize, Serialize, ser::Serializer};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::DEVICE_CONNECTION;
 use crate::mixer;
@@ -1430,7 +1430,8 @@ fn alsa_get(feature: &Feature) -> f32 {
 
     match result {
         Ok(value) => {
-            debug!("Read {} = {}", feature.id, value);
+            // trace, not debug: the mixer is re-read every second
+            trace!("Read {} = {}", feature.id, value);
             feature.set_cached(value);
             value
         }
