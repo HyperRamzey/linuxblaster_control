@@ -7,18 +7,26 @@ use linuxblaster_control::BlasterXG6;
 use tracing::Level;
 
 mod app;
-use app::BlasterApp;
+use app::Launcher;
 
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(Level::DEBUG)
         .init();
 
-    let device = BlasterXG6::init();
-    let app = BlasterApp(device);
+    let app = Launcher::new();
+
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!(
+        "../packaging/linuxblaster-control.png"
+    ))
+    .expect("bundled icon is a valid PNG");
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_title("Linuxblaster Control")
+            // matches the .desktop file, so the taskbar shows the right icon
+            .with_app_id("linuxblaster-control")
+            .with_icon(icon)
             .with_resizable(true)
             .with_inner_size(Vec2::new(1050.0, 600.0))
             // the two-column panes need at least this much room
@@ -28,7 +36,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Sound Blaster X G6 Control",
+        "Linuxblaster Control",
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());

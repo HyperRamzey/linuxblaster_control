@@ -1,6 +1,9 @@
 // #![allow(unused)]
 
-use linuxblaster_control::{BlasterXG6, DEFAULT_BASE_PATH, FeatureId, MIC_EQ_PRESETS, ValueKind};
+use linuxblaster_control::{
+    BlasterXG6, ConnectError, DEFAULT_BASE_PATH, FeatureId, MIC_EQ_PRESETS,
+    UDEV_RULE, UDEV_RULE_PATH, ValueKind,
+};
 use eframe::egui::{
     self, Button, Color32, RichText, Vec2, Vec2b,
 };
@@ -1013,4 +1016,227 @@ fn lighting_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
             }
         });
     });
+}
+
+// ─── Launcher / Setup Screen ─────────────────────────────────────────────────
+
+/// How often the setup screen tries to connect again on its own.
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Wraps the main UI with a setup screen that's shown while the G6
+/// can't be used yet: not plugged in, or no permission to access it.
+/// Most users start the app from their menu, where a panic would just look
+/// like "nothing happens", so every problem gets explained here instead.
+pub struct Launcher {
+    app: Option<BlasterApp>,
+    error: Option<ConnectError>,
+    last_attempt: Instant,
+    /// Running "Allow access" helper (pkexec), if any.
+    setup: Option<std::thread::JoinHandle<Result<(), String>>>,
+    setup_result: Option<Result<(), String>>,
+}
+
+impl Launcher {
+    pub fn new() -> Self {
+        let mut launcher = Self {
+            app: None,
+            error: None,
+            last_attempt: Instant::now(),
+            setup: None,
+            setup_result: None,
+        };
+        launcher.try_connect();
+        launcher
+    }
+
+    fn try_connect(&mut self) {
+        self.last_attempt = Instant::now();
+        match BlasterXG6::try_init() {
+            Ok(device) => {
+                self.app = Some(BlasterApp(device));
+                self.error = None;
+            }
+            Err(error) => {
+                // only log changes, the screen retries every few seconds
+                if self.error.as_ref() != Some(&error) {
+                    warn!("Can't connect to the G6: {}", error);
+                }
+                self.error = Some(error);
+            }
+        }
+    }
+
+    /// Installs the udev rule with a graphical password prompt (pkexec)
+    /// and re-applies the rules to the already connected device.
+    fn install_udev_rule() -> Result<(), String> {
+        let temp_rule = std::env::temp_dir().join("70-linuxblaster-control.rules");
+        std::fs::write(&temp_rule, UDEV_RULE)
+            .map_err(|error| format!("Couldn't write {}: {}", temp_rule.display(), error))?;
+
+        let status = std::process::Command::new("pkexec")
+            .args([
+                "sh",
+                "-c",
+                "install -m 0644 \"$1\" \"$2\" \
+                 && udevadm control --reload-rules \
+                 && udevadm trigger --subsystem-match=hidraw --action=change \
+                 && udevadm settle",
+                "sh",
+            ])
+            .arg(&temp_rule)
+            .arg(UDEV_RULE_PATH)
+            .status();
+        let _ = std::fs::remove_file(&temp_rule);
+
+        match status {
+            Ok(status) if status.success() => Ok(()),
+            // pkexec: 126 = dialog dismissed / not authorized
+            Ok(status) if status.code() == Some(126) => {
+                Err("The password prompt was cancelled.".to_owned())
+            }
+            Ok(status) => Err(format!("Setup failed ({}).", status)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(
+                "pkexec isn't installed, so the password prompt can't be shown. \
+                 Please use the terminal commands below."
+                    .to_owned(),
+            ),
+            Err(error) => Err(format!("Couldn't start pkexec: {}", error)),
+        }
+    }
+
+    fn setup_screen(&mut self, ui: &mut egui::Ui) {
+        let is_nixos = std::path::Path::new("/etc/NIXOS").exists();
+
+        ui.vertical_centered(|ui| {
+            ui.add_space(24.0);
+            ui.heading("Linuxblaster Control");
+            ui.add_space(16.0);
+
+            match &self.error {
+                Some(ConnectError::NotFound) | None => {
+                    ui.label(RichText::new("No Sound BlasterX G6 found").strong().size(18.0));
+                    ui.add_space(8.0);
+                    ui.label("Plug your G6 into a USB port and make sure it's switched on.");
+                    ui.label(
+                        RichText::new("This window will continue automatically once it's connected.")
+                            .color(Color32::GRAY),
+                    );
+                }
+                Some(ConnectError::PermissionDenied { .. }) => {
+                    ui.label(RichText::new("Your G6 was found, but access is not allowed yet").strong().size(18.0));
+                    ui.add_space(8.0);
+                    ui.label(
+                        "Linux only lets apps control USB devices like the G6 after a one-time setup.\n\
+                         This installs a small system rule that lets your user account control the G6.",
+                    );
+                    ui.add_space(12.0);
+
+                    if is_nixos {
+                        ui.label("On NixOS, add this to your configuration and rebuild:");
+                        ui.add_space(4.0);
+                        ui.code(
+                            "services.udev.extraRules = ''\n  \
+                             SUBSYSTEM==\"hidraw\",\n  \
+                             ATTRS{idVendor}==\"041e\", ATTRS{idProduct}==\"3256\",\n  \
+                             MODE=\"0666\", TAG+=\"uaccess\"\n\
+                             '';",
+                        );
+                        ui.label(
+                            RichText::new("(or use the NixOS module from the README)")
+                                .color(Color32::GRAY),
+                        );
+                    } else if self.setup.is_some() {
+                        ui.add(egui::Spinner::new());
+                        ui.label("Waiting for your password…");
+                    } else {
+                        let button = Button::new(RichText::new("Allow access").size(16.0))
+                            .min_size(Vec2::new(160.0, 32.0));
+                        if ui.add(button).clicked() {
+                            self.setup_result = None;
+                            self.setup = Some(std::thread::spawn(Self::install_udev_rule));
+                        }
+                        ui.label(
+                            RichText::new("You'll be asked for your password once.")
+                                .color(Color32::GRAY),
+                        );
+                    }
+
+                    match &self.setup_result {
+                        Some(Err(message)) => {
+                            ui.add_space(8.0);
+                            ui.colored_label(Color32::from_rgb(0xe0, 0x60, 0x60), message);
+                        }
+                        Some(Ok(())) => {
+                            ui.add_space(8.0);
+                            ui.label("Done. If the G6 still isn't accessible, unplug it and plug it back in.");
+                        }
+                        None => {}
+                    }
+
+                    if !is_nixos {
+                        ui.add_space(16.0);
+                        ui.collapsing("Prefer the terminal?", |ui| {
+                            ui.label("Run these commands, then unplug and replug the G6:");
+                            let commands = format!(
+                                "echo '{}' | sudo tee {}\n\
+                                 sudo udevadm control --reload-rules\n\
+                                 sudo udevadm trigger",
+                                UDEV_RULE
+                                    .lines()
+                                    .filter(|line| !line.starts_with('#'))
+                                    .collect::<String>(),
+                                UDEV_RULE_PATH
+                            );
+                            ui.code(&commands);
+                            if ui.button("Copy commands").clicked() {
+                                ui.ctx().copy_text(commands);
+                            }
+                        });
+                    }
+                }
+                Some(ConnectError::Other(message)) => {
+                    ui.label(RichText::new("Couldn't connect to the G6").strong().size(18.0));
+                    ui.add_space(8.0);
+                    ui.label(message);
+                    ui.label(
+                        RichText::new("Unplugging and replugging the G6 often helps.")
+                            .color(Color32::GRAY),
+                    );
+                }
+            }
+
+            ui.add_space(24.0);
+            if ui.button("Try again").clicked() {
+                self.try_connect();
+            }
+        });
+    }
+}
+
+impl eframe::App for Launcher {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(app) = &mut self.app {
+            app.update(ctx, frame);
+            return;
+        }
+
+        if self.setup.as_ref().is_some_and(|setup| setup.is_finished()) {
+            let setup = self.setup.take().expect("checked above");
+            self.setup_result = Some(
+                setup
+                    .join()
+                    .unwrap_or_else(|_| Err("The setup helper crashed.".to_owned())),
+            );
+            self.try_connect();
+        }
+
+        if self.setup.is_none() && self.last_attempt.elapsed() >= RECONNECT_INTERVAL {
+            self.try_connect();
+        }
+
+        if self.app.is_none() {
+            egui::CentralPanel::default().show(ctx, |ui| self.setup_screen(ui));
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+    }
 }

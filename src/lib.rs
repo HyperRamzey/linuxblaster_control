@@ -1,7 +1,6 @@
 #![allow(unused)]
 
 use hidapi::{DeviceInfo, HidApi, HidDevice};
-use rusb;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::error::Error;
@@ -46,14 +45,57 @@ pub static DEFAULT_BASE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
 
 pub static DEVICE_CONNECTION: OnceLock<Mutex<HidDevice>> = OnceLock::new();
 
+/// The udev rule that grants the logged-in user access to the G6.
+/// Shipped in the packages, and installed by the app on request.
+pub const UDEV_RULE: &str = include_str!("../packaging/70-linuxblaster-control.rules");
+pub const UDEV_RULE_PATH: &str = "/etc/udev/rules.d/70-linuxblaster-control.rules";
+
+/// Why the app couldn't connect to the device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectError {
+    /// No G6 is plugged in (or it's switched off).
+    NotFound,
+    /// The G6 is there, but this user may not open its HID interface.
+    /// This is what happens without the udev rule.
+    PermissionDenied { path: String },
+    /// Anything else, with a message for the logs/UI.
+    Other(String),
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "Sound BlasterX G6 not found"),
+            Self::PermissionDenied { path } => {
+                write!(f, "No permission to access {}", path)
+            }
+            Self::Other(message) => write!(f, "{}", message),
+        }
+    }
+}
+
+impl Error for ConnectError {}
+
 #[derive(Serialize, Deserialize)]
 pub struct BlasterXG6 {
     pub features: Vec<Feature>,
 }
 
 impl BlasterXG6 {
+    /// Connects to the device and reads its state.
+    /// Panics if that's not possible; see `try_init()`.
     pub fn init() -> Self {
-        DEVICE_CONNECTION.get_or_init(|| Mutex::new(Self::open_device()));
+        Self::try_init().unwrap_or_else(|error| panic!("{}", error))
+    }
+
+    /// Connects to the device and reads its state.
+    /// Can be called again after an error (e.g. once the G6 is plugged in).
+    pub fn try_init() -> Result<Self, ConnectError> {
+        if DEVICE_CONNECTION.get().is_none() {
+            let connection = Self::open_device()?;
+            // only fails if another thread was faster, which is fine too
+            let _ = DEVICE_CONNECTION.set(Mutex::new(connection));
+        }
 
         // With the hidraw backend the kernel keeps the interrupt endpoint
         // running, so no reset is needed. Only if the device doesn't answer
@@ -63,7 +105,7 @@ impl BlasterXG6 {
             warn!("Device did not answer the ping, resetting USB...");
             Self::reset_usb();
             *DEVICE_CONNECTION.get().unwrap().lock().unwrap() =
-                Self::open_device();
+                Self::open_device()?;
 
             if !features::ping() {
                 error!("Device still not answering after USB reset");
@@ -74,40 +116,101 @@ impl BlasterXG6 {
             features: features::all_features(),
         };
         blaster.read_state_from_device();
-        blaster
+        Ok(blaster)
     }
 
-    fn open_device() -> HidDevice {
-        let api = HidApi::new().expect("Failed to create HID API");
-        let device = Self::find_device(&api).expect("Failed to find device");
-        let connection = device
-            .open_device(&api)
-            .expect("Failed to open device connection");
+    fn open_device() -> Result<HidDevice, ConnectError> {
+        let api = HidApi::new().map_err(|error| {
+            ConnectError::Other(format!("Failed to initialize HID: {}", error))
+        })?;
+        let device =
+            Self::find_device(&api).map_err(|_| ConnectError::NotFound)?;
+
+        // hidapi only reports a generic error, so check the permissions
+        // on the hidraw node directly to tell the user what's wrong
+        let path = device.path().to_string_lossy().into_owned();
+        if let Err(error) =
+            std::fs::OpenOptions::new().read(true).write(true).open(&path)
+        {
+            if error.kind() == ErrorKind::PermissionDenied {
+                return Err(ConnectError::PermissionDenied { path });
+            }
+        }
+
+        let connection = device.open_device(&api).map_err(|error| {
+            ConnectError::Other(format!("Failed to open {}: {}", path, error))
+        })?;
 
         if connection.set_blocking_mode(false).is_err() {
             warn!("Failed to set blocking mode to false");
             warn!("Continuing with blocking mode in unknown state...");
         }
 
-        connection
+        Ok(connection)
     }
 
+    /// Resets the whole USB device (briefly interrupts audio).
+    /// Only used as a fallback, see `try_init()`.
+    /// Needs write access to `/dev/bus/usb/BBB/DDD`, which usually means root.
     pub fn reset_usb() {
-        let Some(handle) =
-            rusb::open_device_with_vid_pid(VENDOR_ID, PRODUCT_ID)
-        else {
-            error!("Failed to open device for USB reset");
+        use std::os::fd::AsRawFd;
+
+        // _IO('U', 20) from linux/usbdevice_fs.h
+        const USBDEVFS_RESET: u64 = 0x5514;
+
+        let Some(node) = Self::usb_device_node() else {
+            error!("Failed to find the USB device node for the reset");
             return;
+        };
+        let file = match std::fs::OpenOptions::new().write(true).open(&node) {
+            Ok(file) => file,
+            Err(error) => {
+                error!("Failed to open {:?} for the USB reset: {}", node, error);
+                return;
+            }
         };
 
         info!("Resetting device...");
-        let _ = handle.reset();
-        drop(handle);
+        // SAFETY: USBDEVFS_RESET takes no argument; the fd is valid while `file` lives
+        let result =
+            unsafe { libc::ioctl(file.as_raw_fd(), USBDEVFS_RESET as _, 0) };
+        if result != 0 {
+            error!("USB reset failed: {}", std::io::Error::last_os_error());
+            return;
+        }
+        drop(file);
         // the kernel needs time to re-enumerate,
         // and the device sends some initial data we don't care about
         // TODO: replace fixed wait time with packet readout to check if reset is complete
         std::thread::sleep(std::time::Duration::from_secs(3));
         info!("Device reset complete.");
+    }
+
+    /// Finds `/dev/bus/usb/BBB/DDD` for the G6 through sysfs.
+    fn usb_device_node() -> Option<PathBuf> {
+        let read = |path: PathBuf| {
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|content| content.trim().to_owned())
+        };
+
+        std::fs::read_dir("/sys/bus/usb/devices")
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|dir| {
+                read(dir.join("idVendor")) == Some(format!("{:04x}", VENDOR_ID))
+                    && read(dir.join("idProduct"))
+                        == Some(format!("{:04x}", PRODUCT_ID))
+            })
+            .and_then(|dir| {
+                let bus: u32 = read(dir.join("busnum"))?.parse().ok()?;
+                let device: u32 = read(dir.join("devnum"))?.parse().ok()?;
+                Some(PathBuf::from(format!(
+                    "/dev/bus/usb/{:03}/{:03}",
+                    bus, device
+                )))
+            })
     }
 
     /// Queries every feature from hardware individually.
