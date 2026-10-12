@@ -133,7 +133,7 @@ enum SbCommand {
     GetHardwareIdResponse      { hw_id: String },
     // 0x26
     GlobalProfileRequest,
-    GlobalProfileResponse      { sbx_master: bool, scout_mode: bool, eq_enable: bool },
+    GlobalProfileResponse      { sbx_master: bool, scout_mode: bool, voice_clarity: bool },
     GlobalProfileWrite         { feature: String, enabled: bool },
     // 0x2c
     OutputSelectReadRequest,
@@ -151,9 +151,10 @@ enum SbCommand {
     DirectModeUnsupported      { sub: String },
     // 0x3a
     Capabilities               { sub: String },
-    // 0x3c
-    GainConfigRequest,
-    GainConfigResponse         { gain: String },
+    // 0x3c (single control 0x02 = mic boost)
+    MicBoostReadRequest,
+    MicBoostReadResponse       { db: u8 },
+    MicBoostWrite              { db: u8 },
     // 0x6c
     DacFilterReadRequest,
     DacFilterReadResponse      { filter: String },
@@ -364,7 +365,7 @@ fn decode_sb(cmd: u8, len: usize, d: &[u8]) -> SbCommand {
                 SbCommand::GlobalProfileResponse {
                     sbx_master: bitmask & 0x01 != 0,
                     scout_mode: bitmask & 0x02 != 0,
-                    eq_enable:  bitmask & 0x04 != 0,
+                    voice_clarity: bitmask & 0x04 != 0,
                 }
             }
             (0x07, _) => {
@@ -420,11 +421,14 @@ fn decode_sb(cmd: u8, len: usize, d: &[u8]) -> SbCommand {
         // Capabilities / RGB lighting — sub-command at d[3]
         0x3a => SbCommand::Capabilities { sub: hb(g(3)) },
 
-        // GainConfig: Send 5a 3c 02 01 00 → Recv 5a 3c 04 01 00 [gain] 00
+        // GainConfig / Mic Boost (control 0x02):
+        //   read:  5a 3c 02 01 00 → 5a 3c 04 01 00 02 [dB]
+        //   write: 5a 3c 04 00 00 02 [dB]
         // Both have d[3]=0x01; request has LEN=2, response has LEN=4 with gain at d[5]
-        0x3c => match len {
-            2 => SbCommand::GainConfigRequest,
-            4 => SbCommand::GainConfigResponse { gain: hb(g(5)) },
+        0x3c => match (len, g(3)) {
+            (2, 0x01) => SbCommand::MicBoostReadRequest,
+            (4, 0x01) => SbCommand::MicBoostReadResponse { db: g(6) },
+            (4, 0x00) => SbCommand::MicBoostWrite { db: g(6) },
             _ => SbCommand::Unknown { cmd: hb(0x3c), raw: tail(3) },
         },
 
@@ -472,6 +476,7 @@ fn feature_raw(family: u8, id: u8, f32_bytes: [u8; 4]) -> FeatureEntry {
     let name = match family {
         0x95 => mic_feature_name(id),
         0x96 => dsp_feature_name(id),
+        0x97 if id == 0x02 => "DecoderMode".to_string(),
         _    => format!("id_{}", hb(id)),
     };
     FeatureEntry { family: hb(family), name, value }

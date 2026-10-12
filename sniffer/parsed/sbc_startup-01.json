@@ -2103,7 +2103,7 @@
         "type": "GlobalProfileResponse",
         "sbx_master": true,
         "scout_mode": false,
-        "eq_enable": true
+        "voice_clarity": true
       }
     }
   },
@@ -2555,7 +2555,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -2565,8 +2565,8 @@
     "endpoint": "HostIn",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigResponse",
-        "gain": "0x02"
+        "type": "MicBoostReadResponse",
+        "db": 0
       }
     }
   },
@@ -2576,7 +2576,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -2586,8 +2586,8 @@
     "endpoint": "HostIn",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigResponse",
-        "gain": "0x02"
+        "type": "MicBoostReadResponse",
+        "db": 0
       }
     }
   },
@@ -4279,7 +4279,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -4289,8 +4289,8 @@
     "endpoint": "HostIn",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigResponse",
-        "gain": "0x02"
+        "type": "MicBoostReadResponse",
+        "db": 0
       }
     }
   },
@@ -4316,7 +4316,7 @@
         "features": [
           {
             "family": "0x97",
-            "name": "id_0x02",
+            "name": "DecoderMode",
             "value": 2.0
           }
         ]

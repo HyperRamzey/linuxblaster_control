@@ -58,7 +58,7 @@
         "type": "GlobalProfileResponse",
         "sbx_master": false,
         "scout_mode": false,
-        "eq_enable": false
+        "voice_clarity": false
       }
     }
   }

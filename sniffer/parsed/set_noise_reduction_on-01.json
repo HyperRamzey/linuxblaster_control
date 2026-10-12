@@ -23,7 +23,7 @@
         "type": "GlobalProfileResponse",
         "sbx_master": true,
         "scout_mode": false,
-        "eq_enable": true
+        "voice_clarity": true
       }
     }
   },

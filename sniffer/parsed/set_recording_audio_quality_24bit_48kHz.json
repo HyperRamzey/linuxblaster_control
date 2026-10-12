@@ -5,7 +5,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -15,8 +15,8 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigResponse",
-        "gain": "0x02"
+        "type": "MicBoostWrite",
+        "db": 20
       }
     }
   },
@@ -26,7 +26,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -36,8 +36,8 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigResponse",
-        "gain": "0x02"
+        "type": "MicBoostWrite",
+        "db": 20
       }
     }
   },
@@ -47,7 +47,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -57,7 +57,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -67,7 +67,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -77,7 +77,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -87,7 +87,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -97,7 +97,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -107,7 +107,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -117,7 +117,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   }

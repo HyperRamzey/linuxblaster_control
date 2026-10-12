@@ -5,7 +5,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -15,8 +15,8 @@
     "endpoint": "HostIn",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigResponse",
-        "gain": "0x02"
+        "type": "MicBoostReadResponse",
+        "db": 0
       }
     }
   },
@@ -26,7 +26,7 @@
     "endpoint": "HostOut",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigRequest"
+        "type": "MicBoostReadRequest"
       }
     }
   },
@@ -36,8 +36,8 @@
     "endpoint": "HostIn",
     "data_fragment": {
       "SbProtocol": {
-        "type": "GainConfigResponse",
-        "gain": "0x02"
+        "type": "MicBoostReadResponse",
+        "db": 0
       }
     }
   }

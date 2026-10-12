@@ -41,7 +41,7 @@
         "type": "GlobalProfileResponse",
         "sbx_master": true,
         "scout_mode": false,
-        "eq_enable": false
+        "voice_clarity": false
       }
     }
   },
