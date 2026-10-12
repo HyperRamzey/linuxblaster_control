@@ -14,7 +14,8 @@ use tracing::{debug, error, info, warn};
 mod tests;
 
 pub mod features;
-pub use features::{Feature, FeatureId, ValueKind};
+pub mod mixer;
+pub use features::{Feature, FeatureId, MIC_EQ_PRESETS, ValueKind};
 
 pub const VENDOR_ID: u16 = 0x041e;
 pub const PRODUCT_ID: u16 = 0x3256;
@@ -52,34 +53,43 @@ pub struct BlasterXG6 {
 
 impl BlasterXG6 {
     pub fn init() -> Self {
-        let device_connection = DEVICE_CONNECTION.get_or_init(|| {
-            #[cfg(not(debug_assertions))]
+        DEVICE_CONNECTION.get_or_init(|| Mutex::new(Self::open_device()));
+
+        // With the hidraw backend the kernel keeps the interrupt endpoint
+        // running, so no reset is needed. Only if the device doesn't answer
+        // (e.g. a libusb-based tool detached the kernel driver before),
+        // fall back to the USB reset that used to be required.
+        if !features::ping() {
+            warn!("Device did not answer the ping, resetting USB...");
             Self::reset_usb();
+            *DEVICE_CONNECTION.get().unwrap().lock().unwrap() =
+                Self::open_device();
 
-            let api = HidApi::new().expect("Failed to create HID API");
-            let device =
-                Self::find_device(&api).expect("Failed to find device");
-            let connection = device
-                .open_device(&api)
-                .expect("Failed to open device connection");
-            Mutex::new(connection)
-        });
+            if !features::ping() {
+                error!("Device still not answering after USB reset");
+            }
+        }
 
-        let features = features::all_features();
+        let blaster = Self {
+            features: features::all_features(),
+        };
+        blaster.read_state_from_device();
+        blaster
+    }
 
-        if device_connection
-            .lock()
-            .unwrap()
-            .set_blocking_mode(false)
-            .is_err()
-        {
+    fn open_device() -> HidDevice {
+        let api = HidApi::new().expect("Failed to create HID API");
+        let device = Self::find_device(&api).expect("Failed to find device");
+        let connection = device
+            .open_device(&api)
+            .expect("Failed to open device connection");
+
+        if connection.set_blocking_mode(false).is_err() {
             warn!("Failed to set blocking mode to false");
             warn!("Continuing with blocking mode in unknown state...");
         }
 
-        let blaster = Self { features };
-        blaster.read_state_from_device();
-        blaster
+        connection
     }
 
     pub fn reset_usb() {
@@ -106,6 +116,80 @@ impl BlasterXG6 {
         for feature in &self.features {
             feature.read_from_device();
         }
+        // whatever got pushed in between is already covered by the reads
+        features::UNSOLICITED.lock().unwrap().clear();
+    }
+
+    /// Re-reads only the ALSA mixer features.
+    /// They can change outside of this app (volume knob, pavucontrol, ...).
+    pub fn read_mixer_state(&self) {
+        for feature in &self.features {
+            if feature.id.alsa_element().is_some() {
+                feature.read_from_device();
+            }
+        }
+    }
+
+    /// Applies state the device pushed on its own
+    /// (after writes, and when the hardware buttons are used)
+    /// to the feature cache, without any extra queries.
+    ///
+    /// Returns `true` if anything was processed.
+    pub fn process_device_events(&self) -> bool {
+        while let Some(packet) = features::read_packet(0) {
+            features::UNSOLICITED.lock().unwrap().push(packet);
+        }
+        let packets = std::mem::take(&mut *features::UNSOLICITED.lock().unwrap());
+
+        let mut output_changed = false;
+        for packet in &packets {
+            if packet[0] != 0x5a {
+                continue;
+            }
+            match packet[1] {
+                // StatusResponse, possibly with multiple features
+                0x11 => {
+                    for (family, feature_id, raw) in
+                        features::status_entries(packet)
+                    {
+                        let Some(id) =
+                            FeatureId::from_dsp_address(family, feature_id)
+                        else {
+                            continue;
+                        };
+                        debug!("Device pushed {} (raw: {})", id, raw);
+                        self.feature(id).set_cached(id.decode(raw));
+                    }
+                }
+                // GlobalProfile bitmask
+                0x26 if packet[3] == 0x08 => {
+                    let bitmask = packet[6];
+                    debug!("Device pushed global bitmask 0x{:02x}", bitmask);
+                    self.feature(FeatureId::SbxMaster).set_cached(
+                        if bitmask & 0x01 != 0 { 1.0 } else { 0.0 },
+                    );
+                    self.feature(FeatureId::ScoutMode).set_cached(
+                        if bitmask & 0x02 != 0 { 1.0 } else { 0.0 },
+                    );
+                }
+                // OutputSelect read response
+                0x2c if packet[3] == 0x01 => {
+                    let output = features::output_decode(packet[4]);
+                    if output != self.feature(FeatureId::Output).value() {
+                        output_changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // the device keeps separate settings per output
+        if output_changed {
+            info!("Output changed on the device, re-reading state");
+            self.read_state_from_device();
+        }
+
+        !packets.is_empty()
     }
 
     /// Lookup a feature by ID.
@@ -132,10 +216,10 @@ impl BlasterXG6 {
         let actual_value = match value {
             Some(value) => value,
             None => {
-                if feature.value() == 0.0 {
-                    1.0
-                } else {
+                if feature.as_bool() {
                     0.0
+                } else {
+                    1.0
                 }
             }
         };
@@ -162,6 +246,8 @@ impl BlasterXG6 {
             self.read_state_from_device();
         }
 
+        self.process_device_events();
+
         Ok(())
     }
 
@@ -184,10 +270,9 @@ impl BlasterXG6 {
         Ok(device)
     }
 
+    /// Checks whether the device answers a ping.
     pub fn is_connected(&self) -> bool {
-        // check if device connection is healthy
-
-        todo!()
+        features::ping()
     }
 
     /// ### Important
@@ -197,59 +282,104 @@ impl BlasterXG6 {
     /// It resets "all" features to their default values, where "all"
     /// means a hard-coded list of features that this software touches.
     ///
-    /// Does not reset Output device.
+    /// Does not reset the Output, Lighting, or the hardware Mixer
+    /// (see `FeatureId::reset_value()`).
     ///
     /// If this software doesn't modify a feature, it won't be included in the reset.
     /// I don't know where this would become relevant,
     /// but I figured it'd be worth noting down.
     pub fn reset(&self) -> Result<(), Box<dyn Error>> {
         // yeah the return type might be stupid, I'll fix it soon™️
-        let features: Vec<Feature> = features::all_features();
-        features.iter().for_each(|feature| {
-            if feature.id == FeatureId::Output {
-                return;
-            }
-            feature.write_to_device(0.0);
-        });
+        let values = self
+            .features
+            .iter()
+            .filter_map(|feature| {
+                feature.id.reset_value().map(|value| (feature.id, value))
+            })
+            .collect();
 
+        self.write_in_order(values);
         self.read_state_from_device();
 
         Ok(())
     }
 
+    /// Writes raw values without the dependency handling of `set_feature()`,
+    /// in an order that avoids device side effects:
+    /// 1. values (levels, EQ bands, modes, ...)
+    /// 2. toggles, which also switch SBX on/off on the device by themselves
+    /// 3. Scout Mode
+    ///
+    /// SBX Master itself is never written here: it reflects whether any
+    /// playback effect is on, and turning it on with no effect active
+    /// makes the device enable Surround on its own.
+    fn write_in_order(&self, values: Vec<(FeatureId, f32)>) {
+        let is_global = |id: FeatureId| {
+            matches!(id, FeatureId::SbxMaster | FeatureId::ScoutMode)
+        };
+        let is_toggle =
+            |id: FeatureId| matches!(id.value_kind(), ValueKind::Toggle);
+
+        let values_first = values
+            .iter()
+            .filter(|(id, _)| !is_toggle(*id) && !is_global(*id));
+        let toggles_second = values
+            .iter()
+            .filter(|(id, _)| is_toggle(*id) && !is_global(*id));
+        let scout_last = values
+            .iter()
+            .filter(|(id, _)| *id == FeatureId::ScoutMode);
+
+        for &(id, value) in values_first.chain(toggles_second).chain(scout_last)
+        {
+            self.feature(id).write_to_device(value);
+        }
+
+        features::UNSOLICITED.lock().unwrap().clear();
+    }
+
     pub fn save_profile(&self, path: PathBuf) -> Result<(), Box<dyn Error>> {
         // save the current state of the features to a profile
 
-        let json = serde_json::to_string_pretty(&self)?;
+        let profile = BlasterXG6 {
+            features: self
+                .features
+                .iter()
+                .filter(|feature| feature.id.in_profile())
+                .cloned()
+                .collect(),
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let json = serde_json::to_string_pretty(&profile)?;
         std::fs::write(&path, json)?;
         info!("Saved Profile to {:?}", path);
 
         Ok(())
     }
 
+    /// Applies a profile to the currently active output.
+    ///
+    /// Every saved value is written, including toggles that are OFF,
+    /// and sliders are written as-is without switching their toggle on.
     pub fn apply_profile(&self, path: PathBuf) -> Result<(), Box<dyn Error>> {
-        // apply a profile to the features
-
         let json = std::fs::read_to_string(&path)?;
         let saved: BlasterXG6 = serde_json::from_str(&json)?;
 
-        for feature in &saved.features {
-            // don't write features that haven't been changed from defautl
-            if feature.value() == 0.0 {
-                continue;
-            }
+        let values = saved
+            .features
+            .iter()
+            .filter(|feature| feature.id.in_profile())
+            // NaN = the value couldn't be read when the profile was saved
+            .filter(|feature| !feature.value().is_nan())
+            .map(|feature| (feature.id, feature.value()))
+            .collect();
 
-            // don't write sliders if their toggle is off
-            if matches!(feature.id.value_kind(), ValueKind::Ranged { .. }) {
-                if let Some(toggle_id) = feature.id.paired_toggle() {
-                    if self.feature(toggle_id).value() == 0.0 {
-                        continue;
-                    }
-                };
-            }
-
-            self.set_feature(feature.id, Some(feature.value()))?;
-        }
+        self.write_in_order(values);
+        self.read_state_from_device();
 
         info!("Applied Profile ({:?})", path);
 

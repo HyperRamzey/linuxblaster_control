@@ -1,6 +1,15 @@
 #[cfg(test)]
 mod tests {
-    use crate::features::{self, FeatureId};
+    use crate::features::{self, FeatureId, MIC_EQ_PRESETS, ValueKind};
+
+    /// Builds a 64-byte packet from a hex string like "5a 11 08 ...".
+    fn packet(hex: &str) -> [u8; 64] {
+        let mut packet = [0u8; 64];
+        for (index, byte) in hex.split_whitespace().enumerate() {
+            packet[index] = u8::from_str_radix(byte, 16).unwrap();
+        }
+        packet
+    }
 
     #[test]
     fn all_feature_ids_are_registered() {
@@ -115,9 +124,10 @@ mod tests {
                         | FeatureId::ScoutMode
                         | FeatureId::Output
                         | FeatureId::DacFilter
-                        | FeatureId::VoiceClarityNoiseReduction
                         | FeatureId::MicBoost
-                ),
+                        | FeatureId::LightingToggle
+                        | FeatureId::LightingColor
+                ) || feature.id.alsa_element().is_some(),
                 "{:?} has no DSP address and is not a known non-DSP feature",
                 feature.id
             );
@@ -132,5 +142,116 @@ mod tests {
     #[test]
     fn eq_all_constant_has_eleven_entries() {
         assert_eq!(FeatureId::EQ_ALL.len(), 11);
+    }
+
+    #[test]
+    fn status_entries_parses_single_feature_response() {
+        // set_crystalizer_on: CrystalizerToggle = 1.0
+        let response = packet("5a 11 08 01 00 96 07 00 00 80 3f");
+        let entries: Vec<_> = features::status_entries(&response).collect();
+        assert_eq!(entries, vec![(0x96, 0x07, 1.0)]);
+    }
+
+    #[test]
+    fn status_entries_parses_multi_feature_push() {
+        // set_output_speakers: profile dump block with 8 features
+        let response = packet(
+            "5a 11 32 08 00 96 01 00 00 00 3f 96 03 00 00 00 3f \
+             96 05 a4 70 3d 3f 96 06 00 00 00 00 96 07 00 00 80 3f \
+             96 08 00 00 00 3f 96 09 00 00 80 3f 96 0a 00 00 00 00",
+        );
+        let entries: Vec<_> = features::status_entries(&response).collect();
+        assert_eq!(entries.len(), 8);
+        assert_eq!(entries[0], (0x96, 0x01, 0.5));
+        assert_eq!(entries[2], (0x96, 0x05, 0.74));
+        assert_eq!(entries[7], (0x96, 0x0a, 0.0));
+    }
+
+    #[test]
+    fn status_entries_ignores_other_commands() {
+        let response = packet("5a 26 0b 08 ff ff 05 00 00 00 00 00 00 00");
+        assert_eq!(features::status_entries(&response).count(), 0);
+    }
+
+    #[test]
+    fn dsp_addresses_are_unique_and_reversible() {
+        for &id in FeatureId::ALL {
+            let Some((family, feature_id)) = id.dsp_address() else {
+                continue;
+            };
+            assert_eq!(
+                FeatureId::from_dsp_address(family, feature_id),
+                Some(id),
+                "{:?} does not round-trip through its DSP address",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn encode_and_decode_round_trip() {
+        for &id in FeatureId::ALL {
+            let values: &[f32] = match id.value_kind() {
+                ValueKind::Preset(labels) => {
+                    &[0.0, 1.0, 2.0][..labels.len().min(3)]
+                }
+                _ => &[0.0, 0.5, 1.0],
+            };
+            for &value in values {
+                assert_eq!(
+                    id.decode(id.encode(value)),
+                    value,
+                    "{:?} does not round-trip {}",
+                    id,
+                    value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decoder_uses_device_values() {
+        // Normal = 2.0, Full = 1.0, Night = 3.0 on the wire
+        assert_eq!(FeatureId::Decoder.encode(0.0), 2.0);
+        assert_eq!(FeatureId::Decoder.encode(1.0), 1.0);
+        assert_eq!(FeatureId::Decoder.encode(2.0), 3.0);
+    }
+
+    #[test]
+    fn noise_reduction_uses_half_scale_on_device() {
+        // set_mic_noise_reduction_level-01: 0.11 on the wire = 22 %
+        let raw = f32::from_le_bytes([0xae, 0x47, 0xe1, 0x3d]);
+        let value = FeatureId::VoiceClarityNoiseReduction.decode(raw);
+        assert!((value - 0.22).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mic_eq_presets_cover_all_bands_within_range() {
+        for (name, bands) in MIC_EQ_PRESETS {
+            assert_eq!(bands.len(), FeatureId::MIC_EQ_BANDS.len(), "{name}");
+            assert!(
+                bands.iter().all(|gain| (-12.0..=12.0).contains(gain)),
+                "{name} has a band outside of ±12 dB"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_never_touches_mixer_or_output() {
+        for &id in FeatureId::ALL {
+            if id.alsa_element().is_some() || id == FeatureId::Output {
+                assert_eq!(id.reset_value(), None, "{:?}", id);
+            }
+        }
+    }
+
+    #[test]
+    fn profile_round_trip_keeps_unread_values() {
+        let features = features::all_features();
+        let json = serde_json::to_string(&features).unwrap();
+        let restored: Vec<features::Feature> =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.len(), features.len());
+        assert!(restored.iter().all(|feature| feature.value().is_nan()));
     }
 }

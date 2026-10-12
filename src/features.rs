@@ -3,9 +3,10 @@ use std::sync::Mutex;
 
 use serde::de::Error;
 use serde::{Deserialize, Serialize, ser::Serializer};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::DEVICE_CONNECTION;
+use crate::mixer;
 
 // ─── FeatureId ───────────────────────────────────────────────────────────────
 
@@ -24,7 +25,7 @@ pub enum FeatureId {
     // OutputSelect (0x2c)
     Output,
 
-    // Dac Filter 0x02
+    // DacFilter (0x6c)
     DacFilter,
 
     // DSP 0x96 — SBX sub-features
@@ -72,6 +73,32 @@ pub enum FeatureId {
 
     // GainConfig (0x3c)
     MicBoost,
+
+    // DSP 0x97 — Decoder
+    Decoder,
+
+    // Lighting (0x3a)
+    LightingToggle,
+    LightingColor,
+
+    // ALSA — USB Audio Class mixer (hardware controls, not HID)
+    SpeakerSwitch,
+    SpeakerVolume,
+    MonitorLineInSwitch,
+    MonitorLineInVolume,
+    MonitorMicSwitch,
+    MonitorMicVolume,
+    MonitorSpdifSwitch,
+    MonitorSpdifVolume,
+    RecordLineInSwitch,
+    RecordLineInVolume,
+    RecordMicSwitch,
+    RecordMicVolume,
+    RecordSpdifSwitch,
+    RecordSpdifVolume,
+    RecordWhatUHearSwitch,
+    RecordWhatUHearVolume,
+    CaptureSource,
 }
 
 impl fmt::Display for FeatureId {
@@ -79,6 +106,30 @@ impl fmt::Display for FeatureId {
         write!(f, "{}", self.display_name())
     }
 }
+
+/// Which side of an ALSA mixer element a feature talks to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlsaDirection {
+    Playback,
+    Capture,
+    /// Enumerated element (e.g. a source selector)
+    Enum,
+}
+
+/// Mic EQ presets as sent by the Windows software (bands 0x95:0x14–0x1b, dB).
+pub const MIC_EQ_PRESETS: &[(&str, [f32; 8])] = &[
+    ("Preset 1", [-3.0, -4.0, 0.0, 2.0, 3.0, -3.0, 4.0, 5.0]),
+    ("Preset 2", [-3.0, -4.0, 0.0, 2.0, 4.0, -2.0, 2.0, 4.0]),
+    ("Preset 3", [-2.0, -3.0, 3.0, 4.0, 4.0, -4.0, 3.0, 2.0]),
+    ("Preset 4", [-3.0, -5.0, 0.0, 4.0, 0.0, -3.0, 0.0, 0.0]),
+    ("Preset 5", [-2.0, -3.0, 2.0, 4.0, 4.0, 0.0, -3.0, 2.0]),
+    ("Preset 6", [-5.0, -4.0, -2.0, 0.0, 3.0, 4.0, 6.0, 7.0]),
+    ("Preset 7", [0.0, 3.0, -2.0, -4.0, -4.0, -2.0, 5.0, 7.0]),
+    ("Preset 8", [0.0, 0.0, 2.0, 2.0, 3.0, -4.0, 2.0, 4.0]),
+    ("Preset 9", [0.0, 0.0, 2.0, 2.0, -2.0, 0.0, -4.0, 4.0]),
+    ("Preset 10", [0.0, 2.0, -2.0, 0.0, 3.0, 5.0, 6.0, 5.0]),
+    ("DM 1", [0.0, 8.0, 0.0, 12.0, 12.0, 4.0, 8.0, 10.0]),
+];
 
 impl FeatureId {
     pub const ALL: &[FeatureId] = &[
@@ -124,6 +175,26 @@ impl FeatureId {
         Self::MicEqBand8,
         Self::MicBoost,
         Self::RecordingSmartVolToggle,
+        Self::Decoder,
+        Self::LightingToggle,
+        Self::LightingColor,
+        Self::SpeakerSwitch,
+        Self::SpeakerVolume,
+        Self::MonitorLineInSwitch,
+        Self::MonitorLineInVolume,
+        Self::MonitorMicSwitch,
+        Self::MonitorMicVolume,
+        Self::MonitorSpdifSwitch,
+        Self::MonitorSpdifVolume,
+        Self::RecordLineInSwitch,
+        Self::RecordLineInVolume,
+        Self::RecordMicSwitch,
+        Self::RecordMicVolume,
+        Self::RecordSpdifSwitch,
+        Self::RecordSpdifVolume,
+        Self::RecordWhatUHearSwitch,
+        Self::RecordWhatUHearVolume,
+        Self::CaptureSource,
     ];
 
     pub const SBX_TOGGLES: &[FeatureId] = &[
@@ -163,6 +234,37 @@ impl FeatureId {
         Self::Eq16kHz,
     ];
 
+    /// The 8 Mic EQ bands, in the order of `MIC_EQ_PRESETS`.
+    pub const MIC_EQ_BANDS: &[FeatureId] = &[
+        Self::MicEqBand1,
+        Self::MicEqBand2,
+        Self::MicEqBand3,
+        Self::MicEqBand4,
+        Self::MicEqBand5,
+        Self::MicEqBand6,
+        Self::MicEqBand7,
+        Self::MicEqBand8,
+    ];
+
+    /// Mixer rows as `(label, switch, volume)`, grouped like the Windows Mixer tab.
+    pub const MIXER_PLAYBACK: &[(&str, FeatureId, FeatureId)] =
+        &[("Speakers", Self::SpeakerSwitch, Self::SpeakerVolume)];
+    pub const MIXER_MONITORING: &[(&str, FeatureId, FeatureId)] = &[
+        ("Line In", Self::MonitorLineInSwitch, Self::MonitorLineInVolume),
+        ("External Mic", Self::MonitorMicSwitch, Self::MonitorMicVolume),
+        ("S/PDIF In", Self::MonitorSpdifSwitch, Self::MonitorSpdifVolume),
+    ];
+    pub const MIXER_RECORDING: &[(&str, FeatureId, FeatureId)] = &[
+        ("Line In", Self::RecordLineInSwitch, Self::RecordLineInVolume),
+        ("External Mic", Self::RecordMicSwitch, Self::RecordMicVolume),
+        ("S/PDIF In", Self::RecordSpdifSwitch, Self::RecordSpdifVolume),
+        (
+            "What U Hear",
+            Self::RecordWhatUHearSwitch,
+            Self::RecordWhatUHearVolume,
+        ),
+    ];
+
     pub fn display_name(&self) -> &'static str {
         match self {
             Self::SbxMaster => "SBX",
@@ -194,8 +296,8 @@ impl FeatureId {
             Self::Eq8kHz => "EQ 8kHz",
             Self::Eq16kHz => "EQ 16kHz",
             Self::AcousticEchoCancellation => "Acoustic Echo Cancellation",
-            Self::VoiceClarityToggle => "Voice Clarity",
-            Self::VoiceClarityNoiseReduction => "Voice Clarity Noise Reduction",
+            Self::VoiceClarityToggle => "Noise Reduction",
+            Self::VoiceClarityNoiseReduction => "Noise Reduction Slider",
             Self::MicEqToggle => "Mic EQ",
             Self::MicEqBand1 => "Mic EQ Band 1",
             Self::MicEqBand2 => "Mic EQ Band 2",
@@ -206,7 +308,27 @@ impl FeatureId {
             Self::MicEqBand7 => "Mic EQ Band 7",
             Self::MicEqBand8 => "Mic EQ Band 8",
             Self::MicBoost => "Mic Boost",
-            Self::RecordingSmartVolToggle => "Recording Smart Volume",
+            Self::RecordingSmartVolToggle => "Smart Volume",
+            Self::Decoder => "Decoder",
+            Self::LightingToggle => "Lighting",
+            Self::LightingColor => "Lighting Color",
+            Self::SpeakerSwitch => "Speakers",
+            Self::SpeakerVolume => "Speakers Volume",
+            Self::MonitorLineInSwitch => "Monitoring Line In",
+            Self::MonitorLineInVolume => "Monitoring Line In Volume",
+            Self::MonitorMicSwitch => "Monitoring External Mic",
+            Self::MonitorMicVolume => "Monitoring External Mic Volume",
+            Self::MonitorSpdifSwitch => "Monitoring S/PDIF In",
+            Self::MonitorSpdifVolume => "Monitoring S/PDIF In Volume",
+            Self::RecordLineInSwitch => "Recording Line In",
+            Self::RecordLineInVolume => "Recording Line In Volume",
+            Self::RecordMicSwitch => "Recording External Mic",
+            Self::RecordMicVolume => "Recording External Mic Volume",
+            Self::RecordSpdifSwitch => "Recording S/PDIF In",
+            Self::RecordSpdifVolume => "Recording S/PDIF In Volume",
+            Self::RecordWhatUHearSwitch => "Recording What U Hear",
+            Self::RecordWhatUHearVolume => "Recording What U Hear Volume",
+            Self::CaptureSource => "Recording Source",
         }
     }
 
@@ -223,14 +345,31 @@ impl FeatureId {
             | Self::AcousticEchoCancellation
             | Self::VoiceClarityToggle
             | Self::MicEqToggle
-            | Self::RecordingSmartVolToggle => ValueKind::Toggle,
+            | Self::RecordingSmartVolToggle
+            | Self::LightingToggle
+            | Self::SpeakerSwitch
+            | Self::MonitorLineInSwitch
+            | Self::MonitorMicSwitch
+            | Self::MonitorSpdifSwitch
+            | Self::RecordLineInSwitch
+            | Self::RecordMicSwitch
+            | Self::RecordSpdifSwitch
+            | Self::RecordWhatUHearSwitch => ValueKind::Toggle,
 
             Self::SurroundLevel
             | Self::DialogPlusLevel
             | Self::SmartVolLevel
             | Self::CrystalizerLevel
             | Self::BassLevel
-            | Self::VoiceClarityNoiseReduction => ValueKind::Percentage,
+            | Self::VoiceClarityNoiseReduction
+            | Self::SpeakerVolume
+            | Self::MonitorLineInVolume
+            | Self::MonitorMicVolume
+            | Self::MonitorSpdifVolume
+            | Self::RecordLineInVolume
+            | Self::RecordMicVolume
+            | Self::RecordSpdifVolume
+            | Self::RecordWhatUHearVolume => ValueKind::Percentage,
 
             Self::EqPreAmp => ValueKind::Ranged {
                 min: -6.0,
@@ -281,10 +420,22 @@ impl FeatureId {
             Self::MicBoost => {
                 ValueKind::Preset(&["0 dB", "10 dB", "20 dB", "30 dB"])
             }
+
+            Self::Decoder => ValueKind::Preset(&["Normal", "Full", "Night"]),
+
+            Self::CaptureSource => ValueKind::Preset(&[
+                "Line In",
+                "External Mic",
+                "S/PDIF In",
+                "What U Hear",
+            ]),
+
+            Self::LightingColor => ValueKind::Color,
         }
     }
 
-    /// The `(family, feature_id)` pair for 0x96 DSP features.
+    /// The `(family, feature_id)` pair for DSP features (families 0x95, 0x96, 0x97)
+    /// that are read via `0x11` and written via `0x12`.
     /// Returns `None` for features using other protocols.
     pub fn dsp_address(&self) -> Option<(u8, u8)> {
         match self {
@@ -314,6 +465,7 @@ impl FeatureId {
             Self::BassLevel => Some((0x96, 0x19)),
             Self::AcousticEchoCancellation => Some((0x95, 0x00)),
             Self::VoiceClarityToggle => Some((0x95, 0x04)),
+            Self::VoiceClarityNoiseReduction => Some((0x95, 0x05)),
             Self::MicEqToggle => Some((0x95, 0x13)),
             Self::MicEqBand1 => Some((0x95, 0x14)),
             Self::MicEqBand2 => Some((0x95, 0x15)),
@@ -324,39 +476,100 @@ impl FeatureId {
             Self::MicEqBand7 => Some((0x95, 0x1a)),
             Self::MicEqBand8 => Some((0x95, 0x1b)),
             Self::RecordingSmartVolToggle => Some((0x95, 0x2c)),
+            Self::Decoder => Some((0x97, 0x02)),
             _ => None,
         }
     }
 
+    /// Reverse lookup of `dsp_address()`.
+    pub fn from_dsp_address(family: u8, feature_id: u8) -> Option<FeatureId> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|id| id.dsp_address() == Some((family, feature_id)))
+    }
+
+    /// The ALSA simple mixer element (on card "G6") backing this feature.
+    /// Returns `None` for HID features.
+    pub fn alsa_element(&self) -> Option<(&'static str, AlsaDirection)> {
+        use AlsaDirection::*;
+        match self {
+            Self::SpeakerSwitch | Self::SpeakerVolume => {
+                Some(("Speaker", Playback))
+            }
+            Self::MonitorLineInSwitch | Self::MonitorLineInVolume => {
+                Some(("Line In", Playback))
+            }
+            Self::MonitorMicSwitch | Self::MonitorMicVolume => {
+                Some(("External Mic", Playback))
+            }
+            Self::MonitorSpdifSwitch | Self::MonitorSpdifVolume => {
+                Some(("S/PDIF In", Playback))
+            }
+            Self::RecordLineInSwitch | Self::RecordLineInVolume => {
+                Some(("Line In", Capture))
+            }
+            Self::RecordMicSwitch | Self::RecordMicVolume => {
+                Some(("External Mic", Capture))
+            }
+            Self::RecordSpdifSwitch | Self::RecordSpdifVolume => {
+                Some(("S/PDIF In", Capture))
+            }
+            Self::RecordWhatUHearSwitch | Self::RecordWhatUHearVolume => {
+                Some(("What U Hear", Capture))
+            }
+            Self::CaptureSource => Some(("PCM Capture Source", Enum)),
+            _ => None,
+        }
+    }
+
+    /// Converts a raw DSP f32 (as sent by the device) into the cached/UI value.
+    pub fn decode(&self, raw: f32) -> f32 {
+        match self {
+            // Device stores 0.0–0.5; UI uses 0.0–1.0
+            Self::VoiceClarityNoiseReduction => raw * 2.0,
+            // Device: 2.0 = Normal, 1.0 = Full, 3.0 = Night
+            Self::Decoder => match raw as u32 {
+                2 => 0.0,
+                1 => 1.0,
+                3 => 2.0,
+                other => {
+                    warn!("Unknown decoder mode {}", other);
+                    f32::NAN
+                }
+            },
+            _ => raw,
+        }
+    }
+
+    /// Inverse of `decode()`: converts a cached/UI value into the raw DSP f32.
+    pub fn encode(&self, value: f32) -> f32 {
+        match self {
+            Self::VoiceClarityNoiseReduction => value / 2.0,
+            Self::Decoder => match value as u32 {
+                1 => 1.0,
+                2 => 3.0,
+                _ => 2.0,
+            },
+            _ => value,
+        }
+    }
+
     /// Features that must be ON for this feature to work.
+    ///
+    /// SBX Master is intentionally never a dependency:
+    /// writing an SBX effect toggle turns SBX on by itself,
+    /// while turning SBX on with no effect active makes the device
+    /// enable Surround on its own (verified on hardware).
     pub fn dependencies(&self) -> &'static [FeatureId] {
         match self {
-            Self::SbxMaster
-            | Self::ScoutMode
-            | Self::Output
-            | Self::DacFilter
-            | Self::AcousticEchoCancellation
-            | Self::MicBoost
-            | Self::RecordingSmartVolToggle => &[],
-
-            Self::SurroundToggle
-            | Self::DialogPlusToggle
-            | Self::SmartVolToggle
-            | Self::CrystalizerToggle
-            | Self::BassToggle
-            | Self::EqToggle => &[Self::SbxMaster],
-
             Self::SurroundLevel | Self::SurroundDistance => {
-                &[Self::SbxMaster, Self::SurroundToggle]
+                &[Self::SurroundToggle]
             }
-            Self::DialogPlusLevel => &[Self::SbxMaster, Self::DialogPlusToggle],
-            Self::SmartVolLevel | Self::SmartVolMode => {
-                &[Self::SbxMaster, Self::SmartVolToggle]
-            }
-            Self::CrystalizerLevel => {
-                &[Self::SbxMaster, Self::CrystalizerToggle]
-            }
-            Self::BassLevel => &[Self::SbxMaster, Self::BassToggle],
+            Self::DialogPlusLevel => &[Self::DialogPlusToggle],
+            Self::SmartVolLevel | Self::SmartVolMode => &[Self::SmartVolToggle],
+            Self::CrystalizerLevel => &[Self::CrystalizerToggle],
+            Self::BassLevel => &[Self::BassToggle],
 
             Self::EqPreAmp
             | Self::Eq31Hz
@@ -368,11 +581,9 @@ impl FeatureId {
             | Self::Eq2kHz
             | Self::Eq4kHz
             | Self::Eq8kHz
-            | Self::Eq16kHz => &[Self::SbxMaster, Self::EqToggle],
+            | Self::Eq16kHz => &[Self::EqToggle],
 
             Self::VoiceClarityNoiseReduction => &[Self::VoiceClarityToggle],
-            Self::VoiceClarityToggle => &[],
-            Self::MicEqToggle => &[],
             Self::MicEqBand1
             | Self::MicEqBand2
             | Self::MicEqBand3
@@ -381,6 +592,10 @@ impl FeatureId {
             | Self::MicEqBand6
             | Self::MicEqBand7
             | Self::MicEqBand8 => &[Self::MicEqToggle],
+
+            Self::LightingColor => &[Self::LightingToggle],
+
+            _ => &[],
         }
     }
 
@@ -388,6 +603,7 @@ impl FeatureId {
     pub fn dependents(&self) -> &'static [FeatureId] {
         match self {
             Self::SbxMaster => &[
+                Self::ScoutMode,
                 Self::SurroundToggle,
                 Self::SurroundLevel,
                 Self::SurroundDistance,
@@ -413,14 +629,20 @@ impl FeatureId {
                 Self::Eq8kHz,
                 Self::Eq16kHz,
             ],
+            Self::ScoutMode => &[Self::SbxMaster],
             Self::SurroundToggle => {
-                &[Self::SurroundLevel, Self::SurroundDistance]
+                &[Self::SbxMaster, Self::SurroundLevel, Self::SurroundDistance]
             }
-            Self::DialogPlusToggle => &[Self::DialogPlusLevel],
-            Self::SmartVolToggle => &[Self::SmartVolLevel, Self::SmartVolMode],
-            Self::CrystalizerToggle => &[Self::CrystalizerLevel],
-            Self::BassToggle => &[Self::BassLevel],
+            Self::DialogPlusToggle => &[Self::SbxMaster, Self::DialogPlusLevel],
+            Self::SmartVolToggle => {
+                &[Self::SbxMaster, Self::SmartVolLevel, Self::SmartVolMode]
+            }
+            Self::CrystalizerToggle => {
+                &[Self::SbxMaster, Self::CrystalizerLevel]
+            }
+            Self::BassToggle => &[Self::SbxMaster, Self::BassLevel],
             Self::EqToggle => &[
+                Self::SbxMaster,
                 Self::EqPreAmp,
                 Self::Eq31Hz,
                 Self::Eq62Hz,
@@ -444,6 +666,7 @@ impl FeatureId {
                 Self::MicEqBand7,
                 Self::MicEqBand8,
             ],
+            Self::LightingToggle => &[Self::LightingColor],
             _ => &[],
         }
     }
@@ -472,6 +695,31 @@ impl FeatureId {
             _ => None,
         }
     }
+
+    /// Whether this feature is stored in / applied from profiles.
+    ///
+    /// The output is excluded because the device keeps a separate set of
+    /// settings per output, so a profile applies to whichever output is active.
+    /// The speaker volume is the system volume and shouldn't jump on profile load.
+    pub fn in_profile(&self) -> bool {
+        !matches!(
+            self,
+            Self::Output | Self::SpeakerSwitch | Self::SpeakerVolume
+        )
+    }
+
+    /// The value written by "Reset All", or `None` if reset leaves it alone.
+    pub fn reset_value(&self) -> Option<f32> {
+        match self {
+            // not part of the sound settings
+            Self::Output | Self::LightingToggle | Self::LightingColor => None,
+            // 0.0 would be out of range, and the factory default is unknown
+            Self::SurroundDistance => None,
+            // hardware mixer: resetting to 0 would mute everything
+            id if id.alsa_element().is_some() => None,
+            _ => Some(0.0),
+        }
+    }
 }
 
 // ─── ValueKind ───────────────────────────────────────────────────────────────
@@ -482,6 +730,8 @@ pub enum ValueKind {
     Percentage,
     Ranged { min: f32, max: f32 },
     Preset(&'static [&'static str]),
+    /// 0xRRGGBB packed into the f32 (exact, since 24 bits fit the mantissa).
+    Color,
 }
 
 // ─── Feature ─────────────────────────────────────────────────────────────────
@@ -530,7 +780,8 @@ impl<'de> Deserialize<'de> for Feature {
         #[derive(Deserialize)]
         struct Raw {
             id: FeatureId,
-            value: f32,
+            // NaN (failed read) is serialized as `null`
+            value: Option<f32>,
         }
         let Raw { id, value } = Raw::deserialize(deserializer)?;
 
@@ -541,14 +792,14 @@ impl<'de> Deserialize<'de> for Feature {
             .ok_or_else(|| {
                 D::Error::custom(format!("Unknown feature id: {}", id))
             })?;
-        *feature.value.lock().unwrap() = value;
+        *feature.value.lock().unwrap() = value.unwrap_or(f32::NAN);
 
         Ok(feature.clone())
     }
 }
 
 impl Feature {
-    /// Constructor for 0x96 family features
+    /// Constructor for DSP family features (0x95/0x96/0x97)
     /// that all share the generic DSP getter/setter.
     pub fn dsp(id: FeatureId) -> Self {
         Self {
@@ -559,18 +810,36 @@ impl Feature {
         }
     }
 
+    /// Constructor for USB Audio Class mixer features, accessed through ALSA.
+    pub fn alsa(id: FeatureId) -> Self {
+        Self {
+            id,
+            value: Mutex::new(f32::NAN),
+            getter: alsa_get,
+            setter: alsa_set,
+        }
+    }
+
     /// Returns the cached value. No hardware I/O.
+    /// `NaN` means the value couldn't be read (yet).
     pub fn value(&self) -> f32 {
         *self.value.lock().unwrap()
     }
 
+    /// Overwrites the cached value without touching the hardware.
+    /// Used for state the device pushes on its own.
+    pub(crate) fn set_cached(&self, value: f32) {
+        *self.value.lock().unwrap() = value;
+    }
+
     /// Returns the bool interpretation of a Toggle feature's cached value.
-    /// Panics if the value is not exactly 0.0 or 1.0 as a sanity check;
+    /// An unread value (NaN) counts as OFF.
+    /// Panics if the value is anything else besides exactly 0.0 or 1.0 as a sanity check;
     /// a non-boolean value for a toggle means the protocol
     /// assumptions are broken and no functionality can be guaranteed.
     pub fn as_bool(&self) -> bool {
         let value = self.value();
-        if value == 0.0 {
+        if value == 0.0 || value.is_nan() {
             false
         } else if value == 1.0 {
             true
@@ -653,12 +922,7 @@ pub fn all_features() -> Vec<Feature> {
         // DSP 0x95 — Recording Pane
         Feature::dsp(FeatureId::AcousticEchoCancellation),
         Feature::dsp(FeatureId::VoiceClarityToggle),
-        Feature {
-            id: FeatureId::VoiceClarityNoiseReduction,
-            value: Mutex::new(f32::NAN),
-            getter: recording_noise_reduction_get,
-            setter: recording_noise_reduction_set,
-        },
+        Feature::dsp(FeatureId::VoiceClarityNoiseReduction),
         Feature::dsp(FeatureId::MicEqToggle),
         Feature::dsp(FeatureId::MicEqBand1),
         Feature::dsp(FeatureId::MicEqBand2),
@@ -675,22 +939,81 @@ pub fn all_features() -> Vec<Feature> {
             getter: gain_config_mic_boost_get,
             setter: gain_config_mic_boost_set,
         },
+        // DSP 0x97 — Decoder
+        Feature::dsp(FeatureId::Decoder),
+        // Lighting (0x3a)
+        Feature {
+            id: FeatureId::LightingToggle,
+            value: Mutex::new(f32::NAN),
+            getter: lighting_toggle_get,
+            setter: lighting_toggle_set,
+        },
+        Feature {
+            id: FeatureId::LightingColor,
+            value: Mutex::new(f32::NAN),
+            getter: lighting_color_get,
+            setter: lighting_color_set,
+        },
+        // ALSA — USB Audio Class mixer
+        Feature::alsa(FeatureId::SpeakerSwitch),
+        Feature::alsa(FeatureId::SpeakerVolume),
+        Feature::alsa(FeatureId::MonitorLineInSwitch),
+        Feature::alsa(FeatureId::MonitorLineInVolume),
+        Feature::alsa(FeatureId::MonitorMicSwitch),
+        Feature::alsa(FeatureId::MonitorMicVolume),
+        Feature::alsa(FeatureId::MonitorSpdifSwitch),
+        Feature::alsa(FeatureId::MonitorSpdifVolume),
+        Feature::alsa(FeatureId::RecordLineInSwitch),
+        Feature::alsa(FeatureId::RecordLineInVolume),
+        Feature::alsa(FeatureId::RecordMicSwitch),
+        Feature::alsa(FeatureId::RecordMicVolume),
+        Feature::alsa(FeatureId::RecordSpdifSwitch),
+        Feature::alsa(FeatureId::RecordSpdifVolume),
+        Feature::alsa(FeatureId::RecordWhatUHearSwitch),
+        Feature::alsa(FeatureId::RecordWhatUHearVolume),
+        Feature::alsa(FeatureId::CaptureSource),
     ]
 }
 
 // ─── USB Packet Helpers ──────────────────────────────────────────────────────
 
+/// How many unrelated packets we skip while waiting for a specific response.
 const MAX_READ_ATTEMPTS: usize = 30;
+/// The device answers within a few ms, so a timeout means nothing is coming.
 const READ_TIMEOUT_MS: i32 = 500;
 
-fn read_packet() -> Option<[u8; 64]> {
+/// Packets that arrived while waiting for something else.
+/// Most are unsolicited state pushes from the device
+/// (e.g. the GlobalProfile bitmask after toggling an effect).
+/// `BlasterXG6::process_device_events()` applies them to the cache.
+pub(crate) static UNSOLICITED: Mutex<Vec<[u8; 64]>> = Mutex::new(Vec::new());
+
+/// Sends one frame (`5a CMD LEN ...`), zero-padded to 64 bytes.
+/// The leading report ID byte required by hidapi is added here.
+fn send(frame: &[u8]) {
+    let mut payload = [0u8; 65];
+    payload[1..=frame.len()].copy_from_slice(frame);
+
+    let result = DEVICE_CONNECTION
+        .get()
+        .expect("Device connection must be initialized")
+        .lock()
+        .unwrap()
+        .write(&payload);
+
+    if let Err(error) = result {
+        error!("Failed to send {:02x?} to device: {:?}", frame, error);
+    }
+}
+
+pub(crate) fn read_packet(timeout_ms: i32) -> Option<[u8; 64]> {
     let mut buffer = [0u8; 64];
     match DEVICE_CONNECTION
         .get()
         .expect("Device connection must be initialized")
         .lock()
         .unwrap()
-        .read_timeout(&mut buffer, READ_TIMEOUT_MS)
+        .read_timeout(&mut buffer, timeout_ms)
     {
         Ok(0) => None,
         Ok(_) => Some(buffer),
@@ -701,33 +1024,82 @@ fn read_packet() -> Option<[u8; 64]> {
     }
 }
 
-fn read_ack() {
+/// Waits for the first packet accepted by `is_match`.
+/// Everything else that arrives in the meantime is queued in `UNSOLICITED`.
+fn receive(
+    what: &str,
+    is_match: impl Fn(&[u8; 64]) -> bool,
+) -> Option<[u8; 64]> {
     for attempt in 0..MAX_READ_ATTEMPTS {
-        let Some(packet) = read_packet() else {
-            error!(
-                "Expected ACK but no response on attempt {}/{}",
-                attempt + 1,
-                MAX_READ_ATTEMPTS
-            );
-            continue;
+        let Some(packet) = read_packet(READ_TIMEOUT_MS) else {
+            error!("No response for {} (timeout)", what);
+            return None;
         };
 
-        if packet[0] == 0x5a && packet[1] == 0x02 {
-            debug!("ACK received: {:02x?}", &packet[..12]);
-            return;
+        if packet[0] == 0x5a && is_match(&packet) {
+            return Some(packet);
         }
 
         debug!(
-            "Discarded non-ACK packet while waiting for ACK on attempt {}: {:02x?}",
+            "Queued unrelated packet on attempt {} while waiting for {}: {:02x?}",
             attempt + 1,
+            what,
             &packet[..12]
         );
+        UNSOLICITED.lock().unwrap().push(packet);
     }
 
-    error!("No ACK received after {} attempts", MAX_READ_ATTEMPTS);
+    error!(
+        "No matching response after {} attempts for {}",
+        MAX_READ_ATTEMPTS, what
+    );
+    None
 }
 
-// ─── DSP Getter/Setter (0x96 family via 0x11/0x12) ──────────────────────────
+fn read_ack() {
+    let Some(packet) = receive("ACK", |packet| packet[1] == 0x02) else {
+        return;
+    };
+
+    // 5a 02 0a [echoed_cmd] [status] ...
+    // status 0x00 = OK; 0x80/0x81/0x83 observed for unsupported requests
+    if packet[4] != 0x00 {
+        error!(
+            "Device rejected command 0x{:02x} (status 0x{:02x}): {:02x?}",
+            packet[3],
+            packet[4],
+            &packet[..12]
+        );
+    } else {
+        debug!("ACK received: {:02x?}", &packet[..12]);
+    }
+}
+
+/// Iterates the `(family, feature_id, raw f32)` entries of a `0x11` StatusResponse.
+/// Handles both single and multi-feature packets:
+/// `5a 11 [len] [count] 00 ([family] [id] [f32 LE × 4]) × count`
+pub fn status_entries(
+    packet: &[u8; 64],
+) -> impl Iterator<Item = (u8, u8, f32)> + '_ {
+    let count = if packet[0] == 0x5a && packet[1] == 0x11 {
+        // at most 9 entries fit into 64 bytes
+        (packet[3] as usize).min((64 - 5) / 6)
+    } else {
+        0
+    };
+
+    (0..count).map(move |index| {
+        let offset = 5 + index * 6;
+        let value = f32::from_le_bytes(
+            packet[offset + 2..offset + 6]
+                .try_into()
+                .expect("slice is 4 bytes"),
+        );
+        (packet[offset], packet[offset + 1], value)
+    })
+}
+
+// ─── DSP Getter/Setter (0x95/0x96/0x97 families via 0x11/0x12) ──────────────
 
 fn dsp_get(feature: &Feature) -> f32 {
     let (family, feature_id) = feature
@@ -740,61 +1112,27 @@ fn dsp_get(feature: &Feature) -> f32 {
         feature.id, family, feature_id
     );
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x11;
-    payload[3] = 0x03;
-    payload[4] = 0x01;
-    payload[5] = family;
-    payload[6] = feature_id;
+    send(&[0x5a, 0x11, 0x03, 0x01, family, feature_id]);
 
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device Connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send Query to Device");
+    let find = |packet: &[u8; 64]| {
+        status_entries(packet)
+            .find(|&(f, id, _)| f == family && id == feature_id)
+            .map(|(_, _, raw)| raw)
+    };
 
-    for attempt in 0..MAX_READ_ATTEMPTS {
-        let Some(response) = read_packet() else {
-            error!(
-                "No response on attempt {}/{} for {}",
-                attempt + 1,
-                MAX_READ_ATTEMPTS,
-                feature.id
-            );
-            continue;
-        };
+    // expected: 5a 11 08 01 00 [family] [id] [f32 LE × 4]
+    // but the value may also arrive inside a multi-feature push
+    let Some(response) = receive(&feature.id.to_string(), |packet| {
+        find(packet).is_some()
+    }) else {
+        return feature.value();
+    };
 
-        // expected: 5a 11 08 01 00 [family] [id] [f32 LE × 4]
-        if response[0] == 0x5a
-            && response[1] == 0x11
-            && response[5] == family
-            && response[6] == feature_id
-        {
-            let value = f32::from_le_bytes(
-                response[7..11]
-                    .try_into()
-                    .expect("Failed to parse f32 from response bytes"),
-            );
-            debug!("Read {} = {}", feature.id, value);
-            *feature.value.lock().unwrap() = value;
-            return value;
-        }
-
-        debug!(
-            "Discarded stale packet on attempt {}: {:02x?}",
-            attempt + 1,
-            &response[..12]
-        );
-    }
-
-    error!(
-        "No matching response after {} attempts for {}",
-        MAX_READ_ATTEMPTS, feature.id
-    );
-    0.0
+    let raw = find(&response).expect("matched packet contains the feature");
+    let value = feature.id.decode(raw);
+    debug!("Read {} = {} (raw: {})", feature.id, value, raw);
+    feature.set_cached(value);
+    value
 }
 
 fn dsp_set(feature: &Feature, value: f32) {
@@ -803,213 +1141,64 @@ fn dsp_set(feature: &Feature, value: f32) {
         .dsp_address()
         .expect("dsp_set called on non-DSP feature");
 
-    debug!(
-        "Writing DSP feature: {} = {} (0x{:02x}:0x{:02x})",
-        feature.id, value, family, feature_id
-    );
-
-    let value_bytes = value.to_le_bytes();
-
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x12;
-    payload[3] = 0x07;
-    payload[4] = 0x01;
-    payload[5] = family;
-    payload[6] = feature_id;
-    payload[7..11].copy_from_slice(&value_bytes);
-
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device Connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send Write to Device");
-
-    read_ack();
-}
-
-// ─── Recording Noise Reduction (0x95:0x05, custom 0.0–0.5 ↔ 0.0–1.0) ────────
-
-fn recording_noise_reduction_get(feature: &Feature) -> f32 {
-    const FAMILY: u8 = 0x95;
-    const FEATURE_ID: u8 = 0x05;
+    let raw = feature.id.encode(value);
 
     debug!(
-        "Querying recording noise reduction (0x{:02x}:0x{:02x})",
-        FAMILY, FEATURE_ID
+        "Writing DSP feature: {} = {} (raw: {}, 0x{:02x}:0x{:02x})",
+        feature.id, value, raw, family, feature_id
     );
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x11;
-    payload[3] = 0x03;
-    payload[4] = 0x01;
-    payload[5] = FAMILY;
-    payload[6] = FEATURE_ID;
-
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send query to device");
-
-    for attempt in 0..MAX_READ_ATTEMPTS {
-        let Some(response) = read_packet() else {
-            error!(
-                "No response on attempt {}/{} for Voice Clarity Noise Reduction",
-                attempt + 1,
-                MAX_READ_ATTEMPTS
-            );
-            continue;
-        };
-
-        if response[0] == 0x5a
-            && response[1] == 0x11
-            && response[5] == FAMILY
-            && response[6] == FEATURE_ID
-        {
-            let device_f32 = f32::from_le_bytes(
-                response[7..11]
-                    .try_into()
-                    .expect("Failed to parse f32 from response bytes"),
-            );
-            // Device stores 0.0–0.5; convert to 0.0–1.0 for UI
-            let value = device_f32 * 2.0;
-            debug!(
-                "Read Voice Clarity Noise Reduction = {} (device: {})",
-                value, device_f32
-            );
-            *feature.value.lock().unwrap() = value;
-            return value;
-        }
-
-        debug!(
-            "Discarded stale packet on attempt {}: {:02x?}",
-            attempt + 1,
-            &response[..12]
-        );
-    }
-
-    error!(
-        "No matching response after {} attempts for Voice Clarity Noise Reduction",
-        MAX_READ_ATTEMPTS
-    );
-    0.0
-}
-
-fn recording_noise_reduction_set(feature: &Feature, value: f32) {
-    const FAMILY: u8 = 0x95;
-    const FEATURE_ID: u8 = 0x05;
-
-    // UI sends 0.0–1.0; convert to 0.0–0.5 for device
-    let device_f32 = value / 2.0;
-
-    debug!(
-        "Writing Voice Clarity Noise Reduction = {} (device: {})",
-        value, device_f32
-    );
-
-    let value_bytes = device_f32.to_le_bytes();
-
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x12;
-    payload[3] = 0x07;
-    payload[4] = 0x01;
-    payload[5] = FAMILY;
-    payload[6] = FEATURE_ID;
-    payload[7..11].copy_from_slice(&value_bytes);
-
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send write to device");
+    // 5a 12 07 01 [family] [id] [f32 LE × 4] — no padding byte before the f32
+    let [b0, b1, b2, b3] = raw.to_le_bytes();
+    send(&[0x5a, 0x12, 0x07, 0x01, family, feature_id, b0, b1, b2, b3]);
 
     read_ack();
 }
 
 // ─── GlobalProfile Getter/Setter (0x26) ──────────────────────────────────────
+//
+// Bitmask bits (verified on hardware):
+//   0x01 — playback DSP active (any SBX effect or EQ on); this is "SBX"
+//   0x02 — Scout Mode
+//   0x04 — recording DSP active (Voice Clarity / Noise Reduction on)
+
+fn global_profile_bit(id: FeatureId) -> u8 {
+    match id {
+        FeatureId::SbxMaster => 0x01,
+        FeatureId::ScoutMode => 0x02,
+        _ => panic!("GlobalProfile feature expected, got {:?}", id),
+    }
+}
 
 fn global_profile_get(feature: &Feature) -> f32 {
-    let bitmask = match feature.id {
-        FeatureId::SbxMaster => 0x01u8,
-        FeatureId::ScoutMode => 0x02u8,
-        _ => panic!("global_profile_get called on {:?}", feature.id),
-    };
+    let bitmask = global_profile_bit(feature.id);
 
     debug!(
         "Querying global profile: {} (bit 0x{:02x})",
         feature.id, bitmask
     );
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x26;
-    payload[3] = 0x03;
-    payload[4] = 0x08;
-    payload[5] = 0xff;
-    payload[6] = 0xff;
+    send(&[0x5a, 0x26, 0x03, 0x08, 0xff, 0xff]);
 
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send query to device");
+    // expected: 5a 26 0b 08 ff ff [bitmask] ...
+    let Some(response) = receive(&feature.id.to_string(), |packet| {
+        packet[1] == 0x26 && packet[3] == 0x08
+    }) else {
+        return feature.value();
+    };
 
-    for attempt in 0..MAX_READ_ATTEMPTS {
-        let Some(response) = read_packet() else {
-            error!(
-                "No response on attempt {}/{} for {}",
-                attempt + 1,
-                MAX_READ_ATTEMPTS,
-                feature.id
-            );
-            continue;
-        };
-
-        // expected: 5a 26 0b 08 ff ff [bitmask] ...
-        if response[0] == 0x5a && response[1] == 0x26 {
-            let device_bitmask = response[6];
-            let is_on = (device_bitmask & bitmask) != 0;
-            let value = if is_on { 1.0 } else { 0.0 };
-            debug!(
-                "Read {} = {} (device bitmask: 0x{:02x})",
-                feature.id, value, device_bitmask
-            );
-            *feature.value.lock().unwrap() = value;
-            return value;
-        }
-
-        debug!(
-            "Discarded stale packet on attempt {}: {:02x?}",
-            attempt + 1,
-            &response[..12]
-        );
-    }
-
-    error!(
-        "No matching response after {} attempts for {}",
-        MAX_READ_ATTEMPTS, feature.id
+    let device_bitmask = response[6];
+    let value = if device_bitmask & bitmask != 0 { 1.0 } else { 0.0 };
+    debug!(
+        "Read {} = {} (device bitmask: 0x{:02x})",
+        feature.id, value, device_bitmask
     );
-    0.0
+    feature.set_cached(value);
+    value
 }
 
 fn global_profile_set(feature: &Feature, value: f32) {
-    let profile_id = match feature.id {
-        FeatureId::SbxMaster => 0x01u8,
-        FeatureId::ScoutMode => 0x02u8,
-        _ => panic!("global_profile_set called on {:?}", feature.id),
-    };
-
+    let profile_id = global_profile_bit(feature.id);
     let state = if value > 0.0 { 0x01u8 } else { 0x00u8 };
 
     debug!(
@@ -1017,88 +1206,45 @@ fn global_profile_set(feature: &Feature, value: f32) {
         feature.id, value, profile_id, state
     );
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x26;
-    payload[3] = 0x05;
-    payload[4] = 0x07;
-    payload[5] = profile_id;
-    payload[6] = 0x00;
-    payload[7] = state;
-    payload[8] = 0x00;
-
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send write to device");
+    send(&[0x5a, 0x26, 0x05, 0x07, profile_id, 0x00, state, 0x00]);
 
     read_ack();
 }
 
 // ─── Output Getter/Setter (0x2c) ────────────────────────────────────────────
+//
+// Cached value: 0.0 = Speakers (0x02), 1.0 = Headphones (0x04)
+
+pub(crate) fn output_decode(mode: u8) -> f32 {
+    match mode {
+        0x02 => 0.0,
+        0x04 => 1.0,
+        other => {
+            error!("Unknown output mode: 0x{:02x}", other);
+            f32::NAN
+        }
+    }
+}
 
 fn output_get(feature: &Feature) -> f32 {
     debug!("Querying output device");
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x2c;
-    payload[3] = 0x01;
-    payload[4] = 0x01;
+    send(&[0x5a, 0x2c, 0x01, 0x01]);
 
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send Query to Device");
+    // expected: 5a 2c 05 01 [mode] ...
+    let Some(response) = receive("Output", |packet| {
+        packet[1] == 0x2c && packet[3] == 0x01
+    }) else {
+        return feature.value();
+    };
 
-    for attempt in 0..MAX_READ_ATTEMPTS {
-        let Some(response) = read_packet() else {
-            error!(
-                "No response on attempt {}/{} for Output",
-                attempt + 1,
-                MAX_READ_ATTEMPTS
-            );
-            continue;
-        };
-
-        // expected: 5a 2c 05 01 [mode] ...
-        if response[0] == 0x5a && response[1] == 0x2c {
-            let value = match response[4] {
-                0x02 => {
-                    info!("Current output: Speakers");
-                    0.0
-                }
-                0x04 => {
-                    info!("Current output: Headphones");
-                    1.0
-                }
-                other => {
-                    error!("Unknown output mode: 0x{:02x}", other);
-                    f32::NAN
-                }
-            };
-            *feature.value.lock().unwrap() = value;
-            return value;
-        }
-
-        debug!(
-            "Discarded stale packet on attempt {}: {:02x?}",
-            attempt + 1,
-            &response[..12]
-        );
-    }
-
-    error!(
-        "No matching response after {} attempts for Output",
-        MAX_READ_ATTEMPTS
+    let value = output_decode(response[4]);
+    info!(
+        "Current output: {}",
+        if value == 0.0 { "Speakers" } else { "Headphones" }
     );
-    0.0
+    feature.set_cached(value);
+    value
 }
 
 fn output_set(feature: &Feature, value: f32) {
@@ -1106,23 +1252,7 @@ fn output_set(feature: &Feature, value: f32) {
 
     debug!("Setting output: mode 0x{:02x}", mode);
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x2c;
-    payload[3] = 0x05;
-    payload[4] = 0x00;
-    payload[5] = mode;
-    payload[6] = 0x00;
-    payload[7] = 0x00;
-    payload[8] = 0x00;
-
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send write to device");
+    send(&[0x5a, 0x2c, 0x05, 0x00, mode, 0x00, 0x00, 0x00]);
 
     read_ack();
 }
@@ -1136,54 +1266,22 @@ fn output_set(feature: &Feature, value: f32) {
 fn dac_filter_get(feature: &Feature) -> f32 {
     debug!("Querying DAC filter");
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x6c;
-    payload[3] = 0x01;
-    payload[4] = 0x01;
+    send(&[0x5a, 0x6c, 0x01, 0x01]);
 
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send query to device");
+    let Some(response) = receive("DAC filter", |packet| {
+        packet[1] == 0x6c && packet[3] == 0x01
+    }) else {
+        return feature.value();
+    };
 
-    for attempt in 0..MAX_READ_ATTEMPTS {
-        let Some(response) = read_packet() else {
-            error!(
-                "No response on attempt {}/{} for DAC filter",
-                attempt + 1,
-                MAX_READ_ATTEMPTS
-            );
-            continue;
-        };
-
-        // expected: 5a 6c 03 01 [filter] 00
-        if response[0] == 0x5a && response[1] == 0x6c {
-            let filter_byte = response[4];
-            let value = (filter_byte.saturating_sub(1)) as f32;
-            info!(
-                "Current DAC filter: 0x{:02x} (index {})",
-                filter_byte, value
-            );
-            *feature.value.lock().unwrap() = value;
-            return value;
-        }
-
-        debug!(
-            "Discarded stale packet on attempt {}: {:02x?}",
-            attempt + 1,
-            &response[..12]
-        );
-    }
-
-    error!(
-        "No matching response after {} attempts for DAC filter",
-        MAX_READ_ATTEMPTS
+    let filter_byte = response[4];
+    let value = (filter_byte.saturating_sub(1)) as f32;
+    info!(
+        "Current DAC filter: 0x{:02x} (index {})",
+        filter_byte, value
     );
-    0.0
+    feature.set_cached(value);
+    value
 }
 
 fn dac_filter_set(feature: &Feature, value: f32) {
@@ -1194,109 +1292,180 @@ fn dac_filter_set(feature: &Feature, value: f32) {
         value, filter_byte
     );
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x6c;
-    payload[3] = 0x03;
-    payload[4] = 0x00;
-    payload[5] = filter_byte;
-    payload[6] = 0x00;
-
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send write to device");
+    send(&[0x5a, 0x6c, 0x03, 0x00, filter_byte, 0x00]);
 
     read_ack();
 }
 
-// ─── GainConfig Mic Boost (0x3c sub 0x04) ───────────────────────────────────
+// ─── GainConfig Mic Boost (0x3c) ────────────────────────────────────────────
 //
-// Read:  5a 3c 04 01 00  →  5a 3c [len] 01 00 [dB_u32_LE] ...
-// Write: 5a 3c 04 00 00 02 [dB_u32_LE] ...
-// Preset indices 0–3 map to 0, 10, 20, 30 dB.
+// 0x3c enumerates exactly one gain control (id 0x02), which is the mic boost.
+// Read:  5a 3c 02 01 00        →  5a 3c 04 01 00 02 [dB]
+// Write: 5a 3c 04 00 00 02 [dB]
+// Preset indices 0–3 map to 0, 10, 20, 30 dB. (verified on hardware)
 
 fn gain_config_mic_boost_get(feature: &Feature) -> f32 {
     debug!("Querying mic boost");
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x3c;
-    payload[3] = 0x04;
-    payload[4] = 0x01;
-    payload[5] = 0x00;
+    send(&[0x5a, 0x3c, 0x02, 0x01, 0x00]);
 
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send query to device");
+    let Some(response) = receive("Mic Boost", |packet| {
+        packet[1] == 0x3c && packet[3] == 0x01 && packet[5] == 0x02
+    }) else {
+        return feature.value();
+    };
 
-    for attempt in 0..MAX_READ_ATTEMPTS {
-        let Some(response) = read_packet() else {
-            error!(
-                "No response on attempt {}/{} for Mic Boost",
-                attempt + 1,
-                MAX_READ_ATTEMPTS
-            );
-            continue;
-        };
-
-        if response[0] == 0x5a && response[1] == 0x3c && response[3] == 0x01 {
-            let db = u32::from_le_bytes(
-                response[5..9]
-                    .try_into()
-                    .expect("Failed to parse u32 from response bytes"),
-            );
-            let index = (db / 10) as f32;
-            let index = index.clamp(0.0, 3.0);
-            debug!("Read Mic Boost = {} dB (index {})", db, index);
-            *feature.value.lock().unwrap() = index;
-            return index;
-        }
-
-        debug!(
-            "Discarded stale packet on attempt {}: {:02x?}",
-            attempt + 1,
-            &response[..12]
-        );
-    }
-
-    error!(
-        "No matching response after {} attempts for Mic Boost",
-        MAX_READ_ATTEMPTS
-    );
-    0.0
+    let db = response[6];
+    let index = (db / 10).min(3) as f32;
+    debug!("Read Mic Boost = {} dB (index {})", db, index);
+    feature.set_cached(index);
+    index
 }
 
 fn gain_config_mic_boost_set(feature: &Feature, value: f32) {
-    let index = value.clamp(0.0, 3.0);
-    let db = (index as u32) * 10;
-    let value_bytes = db.to_le_bytes();
+    let index = value.clamp(0.0, 3.0) as u8;
+    let db = index * 10;
 
     debug!("Setting Mic Boost: index {} → {} dB", index, db);
 
-    let mut payload = [0u8; 65];
-    payload[1] = 0x5a;
-    payload[2] = 0x3c;
-    payload[3] = 0x04;
-    payload[4] = 0x00;
-    payload[5] = 0x00;
-    payload[6] = 0x02;
-    payload[7..11].copy_from_slice(&value_bytes);
-
-    DEVICE_CONNECTION
-        .get()
-        .expect("Device connection must be initialized")
-        .lock()
-        .unwrap()
-        .write(&payload)
-        .expect("Failed to send write to device");
+    send(&[0x5a, 0x3c, 0x04, 0x00, 0x00, 0x02, db]);
 
     read_ack();
+}
+
+// ─── Lighting (0x3a) ────────────────────────────────────────────────────────
+//
+// Enabled:  read 5a 3a 01 07 → 5a 3a 02 07 [0|1]
+//           write 5a 3a 02 06 [0|1]
+// Color:    read 5a 3a 06 0b 01 00 01 01 01 → 5a 3a 09 0b 01 00 01 01 [A B G R]
+//           write 5a 3a 06 04 00 03 01 00 01            (static mode)
+//                 5a 3a 09 0a 00 03 01 01 [A B G R]     (color)
+// (verified on hardware; A is always 0xff)
+
+fn lighting_toggle_get(feature: &Feature) -> f32 {
+    debug!("Querying lighting state");
+
+    send(&[0x5a, 0x3a, 0x01, 0x07]);
+
+    let Some(response) = receive("Lighting", |packet| {
+        packet[1] == 0x3a && packet[3] == 0x07
+    }) else {
+        return feature.value();
+    };
+
+    let value = if response[4] != 0 { 1.0 } else { 0.0 };
+    debug!("Read Lighting = {}", value);
+    feature.set_cached(value);
+    value
+}
+
+fn lighting_toggle_set(feature: &Feature, value: f32) {
+    let state = if value > 0.0 { 0x01u8 } else { 0x00u8 };
+
+    debug!("Setting Lighting: 0x{:02x}", state);
+
+    send(&[0x5a, 0x3a, 0x02, 0x06, state]);
+
+    read_ack();
+}
+
+fn lighting_color_get(feature: &Feature) -> f32 {
+    debug!("Querying lighting color");
+
+    send(&[0x5a, 0x3a, 0x06, 0x0b, 0x01, 0x00, 0x01, 0x01, 0x01]);
+
+    let Some(response) = receive("Lighting Color", |packet| {
+        packet[1] == 0x3a && packet[3] == 0x0b
+    }) else {
+        return feature.value();
+    };
+
+    let [_alpha, blue, green, red] = [
+        response[8],
+        response[9],
+        response[10],
+        response[11],
+    ];
+    let rgb = u32::from_be_bytes([0, red, green, blue]);
+    debug!("Read Lighting Color = #{:06x}", rgb);
+    let value = rgb as f32;
+    feature.set_cached(value);
+    value
+}
+
+fn lighting_color_set(feature: &Feature, value: f32) {
+    let [_, red, green, blue] = (value as u32).to_be_bytes();
+
+    debug!(
+        "Setting Lighting Color: #{:02x}{:02x}{:02x}",
+        red, green, blue
+    );
+
+    send(&[0x5a, 0x3a, 0x06, 0x04, 0x00, 0x03, 0x01, 0x00, 0x01]);
+    read_ack();
+
+    send(&[
+        0x5a, 0x3a, 0x09, 0x0a, 0x00, 0x03, 0x01, 0x01, 0xff, blue, green, red,
+    ]);
+    read_ack();
+}
+
+// ─── ALSA Getter/Setter (USB Audio Class mixer) ─────────────────────────────
+//
+// These are hardware controls inside the G6 (UAC Feature Units / Selector Unit).
+// ALSA only forwards them as standard USB requests; no software processing.
+
+fn alsa_get(feature: &Feature) -> f32 {
+    let (element, direction) = feature
+        .id
+        .alsa_element()
+        .expect("alsa_get called on non-ALSA feature");
+
+    let result = match feature.id.value_kind() {
+        ValueKind::Toggle => mixer::get_switch(element, direction),
+        ValueKind::Percentage => mixer::get_volume(element, direction),
+        ValueKind::Preset(_) => mixer::get_enum(element),
+        other => unreachable!("ALSA feature with value kind {:?}", other),
+    };
+
+    match result {
+        Ok(value) => {
+            debug!("Read {} = {}", feature.id, value);
+            feature.set_cached(value);
+            value
+        }
+        Err(error) => {
+            error!("Failed to read {} from ALSA: {}", feature.id, error);
+            feature.value()
+        }
+    }
+}
+
+fn alsa_set(feature: &Feature, value: f32) {
+    let (element, direction) = feature
+        .id
+        .alsa_element()
+        .expect("alsa_set called on non-ALSA feature");
+
+    debug!("Writing {} = {} (ALSA)", feature.id, value);
+
+    let result = match feature.id.value_kind() {
+        ValueKind::Toggle => mixer::set_switch(element, direction, value),
+        ValueKind::Percentage => mixer::set_volume(element, direction, value),
+        ValueKind::Preset(_) => mixer::set_enum(element, value),
+        other => unreachable!("ALSA feature with value kind {:?}", other),
+    };
+
+    if let Err(error) = result {
+        error!("Failed to write {} to ALSA: {}", feature.id, error);
+    }
+}
+
+// ─── Connection Check ───────────────────────────────────────────────────────
+
+/// Ping (0x06): the device echoes `5a 06 01 01`.
+/// If this fails, the interrupt IN endpoint isn't delivering responses.
+pub(crate) fn ping() -> bool {
+    send(&[0x5a, 0x06, 0x01, 0x01]);
+    receive("Ping", |packet| packet[1] == 0x06).is_some()
 }

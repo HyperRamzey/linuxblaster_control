@@ -2,6 +2,7 @@
 , rustPlatform
 , pkg-config
 , udev
+, alsa-lib
 , wayland
 , libxkbcommon
 , libGL
@@ -39,6 +40,7 @@ rustPlatform.buildRustPackage rec {
 
   buildInputs = [
     udev
+    alsa-lib
     wayland
     libxkbcommon
     libGL
@@ -50,6 +52,7 @@ rustPlatform.buildRustPackage rec {
   # Runtime library path for dynamic linking
   runtimeDependencies = [
     udev
+    alsa-lib
     wayland
     libxkbcommon
     libGL
@@ -76,7 +79,7 @@ rustPlatform.buildRustPackage rec {
 
   postFixup = ''
     # Add runtime dependencies to the binary
-    patchelf --add-rpath "${lib.makeLibraryPath [ udev wayland libxkbcommon libGL libglvnd libusb1 ]}" $out/bin/linuxblaster_control
+    patchelf --add-rpath "${lib.makeLibraryPath [ udev alsa-lib wayland libxkbcommon libGL libglvnd libusb1 ]}" $out/bin/linuxblaster_control
   '';
 
   desktopItems = [
