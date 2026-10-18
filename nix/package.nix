@@ -3,6 +3,7 @@
 , pkg-config
 , udev
 , alsa-lib
+, dbus
 , wayland
 , libxkbcommon
 , libGL
@@ -56,9 +57,11 @@ rustPlatform.buildRustPackage rec {
   ];
 
   # Runtime library path for dynamic linking
+  # (dbus is loaded at runtime by the file dialog for Load/Save Profile)
   runtimeDependencies = [
     udev
     alsa-lib
+    dbus
     wayland
     libxkbcommon
     libGL
@@ -84,7 +87,7 @@ rustPlatform.buildRustPackage rec {
 
   postFixup = ''
     # Add runtime dependencies to the binary
-    patchelf --add-rpath "${lib.makeLibraryPath [ udev alsa-lib wayland libxkbcommon libGL libglvnd ]}" $out/bin/linuxblaster_control
+    patchelf --add-rpath "${lib.makeLibraryPath [ udev alsa-lib dbus wayland libxkbcommon libGL libglvnd ]}" $out/bin/linuxblaster_control
   '';
 
   meta = with lib; {

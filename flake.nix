@@ -72,6 +72,7 @@
             packages = with pkgs; [
               udev 
               alsa-lib
+              dbus
               rustToolchain
               openssl
               pkg-config
@@ -102,7 +103,7 @@
             env = {
               # Required by rust-analyzer
               RUST_SRC_PATH = "${pkgs.rustToolchain}/lib/rustlib/src/rust/library";
-              LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.udev pkgs.alsa-lib pkgs.wayland pkgs.libxkbcommon pkgs.libGL pkgs.libglvnd pkgs.openssl pkgs.libusb1]}";
+              LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.udev pkgs.alsa-lib pkgs.dbus pkgs.wayland pkgs.libxkbcommon pkgs.libGL pkgs.libglvnd pkgs.openssl pkgs.libusb1]}";
             };
           };
         }
