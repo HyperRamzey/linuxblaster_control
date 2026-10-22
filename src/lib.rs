@@ -7,6 +7,7 @@ use std::error::Error;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
@@ -97,19 +98,19 @@ impl BlasterXG6 {
             let _ = DEVICE_CONNECTION.set(Mutex::new(connection));
         }
 
-        // With the hidraw backend the kernel keeps the interrupt endpoint
-        // running, so no reset is needed. Only if the device doesn't answer
-        // (e.g. a libusb-based tool detached the kernel driver before),
-        // fall back to the USB reset that used to be required.
-        if !features::ping() {
-            warn!("Device did not answer the ping, resetting USB...");
-            Self::reset_usb();
-            *DEVICE_CONNECTION.get().unwrap().lock().unwrap() =
-                Self::open_device()?;
-
-            if !features::ping() {
-                error!("Device still not answering after USB reset");
-            }
+        // The G6's HID endpoint can be slow to answer right after a cold
+        // boot or a re-enumeration. Wait briefly and retry, reopening the
+        // hidraw node in case the device re-enumerated in the meantime.
+        //
+        // Never reset the USB device here. A USBDEVFS_RESET wakes the HID
+        // endpoint, but it also leaves the audio interface unusable until
+        // the next re-enumeration, which breaks playback for the whole
+        // session. The cold-boot helper does the reset before the audio
+        // server opens the device; this launcher only waits and retries.
+        if !Self::wait_for_ping() {
+            return Err(ConnectError::Other(
+                "The G6's control interface is not answering yet.".to_owned(),
+            ));
         }
 
         let blaster = Self {
@@ -117,6 +118,31 @@ impl BlasterXG6 {
         };
         blaster.read_state_from_device();
         Ok(blaster)
+    }
+
+    /// Waits for the HID endpoint to answer, reopening the device between
+    /// attempts. Returns `false` if it stays silent.
+    ///
+    /// Reopening is required because a re-enumeration invalidates the old
+    /// hidraw file descriptor, and the kernel does not retarget it.
+    fn wait_for_ping() -> bool {
+        const ATTEMPTS: usize = 3;
+        const INTERVAL: Duration = Duration::from_millis(300);
+
+        for attempt in 0..ATTEMPTS {
+            if features::ping_quiet() {
+                return true;
+            }
+            if attempt + 1 == ATTEMPTS {
+                break;
+            }
+            std::thread::sleep(INTERVAL);
+            if let Ok(connection) = Self::open_device() {
+                *DEVICE_CONNECTION.get().unwrap().lock().unwrap() =
+                    connection;
+            }
+        }
+        false
     }
 
     fn open_device() -> Result<HidDevice, ConnectError> {
@@ -147,70 +173,6 @@ impl BlasterXG6 {
         }
 
         Ok(connection)
-    }
-
-    /// Resets the whole USB device (briefly interrupts audio).
-    /// Only used as a fallback, see `try_init()`.
-    /// Needs write access to `/dev/bus/usb/BBB/DDD`, which usually means root.
-    pub fn reset_usb() {
-        use std::os::fd::AsRawFd;
-
-        // _IO('U', 20) from linux/usbdevice_fs.h
-        const USBDEVFS_RESET: u64 = 0x5514;
-
-        let Some(node) = Self::usb_device_node() else {
-            error!("Failed to find the USB device node for the reset");
-            return;
-        };
-        let file = match std::fs::OpenOptions::new().write(true).open(&node) {
-            Ok(file) => file,
-            Err(error) => {
-                error!("Failed to open {:?} for the USB reset: {}", node, error);
-                return;
-            }
-        };
-
-        info!("Resetting device...");
-        // SAFETY: USBDEVFS_RESET takes no argument; the fd is valid while `file` lives
-        let result =
-            unsafe { libc::ioctl(file.as_raw_fd(), USBDEVFS_RESET as _, 0) };
-        if result != 0 {
-            error!("USB reset failed: {}", std::io::Error::last_os_error());
-            return;
-        }
-        drop(file);
-        // the kernel needs time to re-enumerate,
-        // and the device sends some initial data we don't care about
-        // TODO: replace fixed wait time with packet readout to check if reset is complete
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        info!("Device reset complete.");
-    }
-
-    /// Finds `/dev/bus/usb/BBB/DDD` for the G6 through sysfs.
-    fn usb_device_node() -> Option<PathBuf> {
-        let read = |path: PathBuf| {
-            std::fs::read_to_string(path)
-                .ok()
-                .map(|content| content.trim().to_owned())
-        };
-
-        std::fs::read_dir("/sys/bus/usb/devices")
-            .ok()?
-            .flatten()
-            .map(|entry| entry.path())
-            .find(|dir| {
-                read(dir.join("idVendor")) == Some(format!("{:04x}", VENDOR_ID))
-                    && read(dir.join("idProduct"))
-                        == Some(format!("{:04x}", PRODUCT_ID))
-            })
-            .and_then(|dir| {
-                let bus: u32 = read(dir.join("busnum"))?.parse().ok()?;
-                let device: u32 = read(dir.join("devnum"))?.parse().ok()?;
-                Some(PathBuf::from(format!(
-                    "/dev/bus/usb/{:03}/{:03}",
-                    bus, device
-                )))
-            })
     }
 
     /// Queries every feature from hardware individually.
