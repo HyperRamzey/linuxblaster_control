@@ -1470,3 +1470,27 @@ pub(crate) fn ping() -> bool {
     send(&[0x5a, 0x06, 0x01, 0x01]);
     receive("Ping", |packet| packet[1] == 0x06).is_some()
 }
+
+/// Like [`ping`], but without logging a timeout.
+///
+/// Used while the G6 is still booting: a missing answer is expected there,
+/// and the caller retries. Logging every attempt would flood the journal.
+pub(crate) fn ping_quiet() -> bool {
+    let mut payload = [0u8; 65];
+    payload[1..5].copy_from_slice(&[0x5a, 0x06, 0x01, 0x01]);
+
+    let mut buffer = [0u8; 64];
+    let mut device = DEVICE_CONNECTION
+        .get()
+        .expect("Device connection must be initialized")
+        .lock()
+        .unwrap();
+
+    if device.write(&payload).is_err() {
+        return false;
+    }
+    match device.read_timeout(&mut buffer, READ_TIMEOUT_MS) {
+        Ok(length) if length > 0 => buffer[1] == 0x06,
+        _ => false,
+    }
+}
