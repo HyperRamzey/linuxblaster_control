@@ -667,7 +667,8 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                                 .as_ref()
                                 .map(|path| path.display().to_string())
                                 .unwrap_or_else(|| {
-                                    "Install will build it from ~/g6-re/port"
+                                    "Bundled with the app; install copies it \
+                                     to ~/.local/lib/linuxblaster"
                                         .to_owned()
                                 }),
                         );
@@ -1035,10 +1036,10 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new(
-                        "The virtual sink uses the separate GPL-3.0 g6ct \
-                         LADSPA plugin from the g6-re project. The app stays \
-                         MIT; the installer builds or copies the plugin \
-                         locally and never downloads native code.",
+                        "The virtual sink uses the g6ct LADSPA plugin, \
+                         vendored under vendor/g6ct and licensed MIT like \
+                         the app. It is compiled into this binary, so the \
+                         installer needs no source tree and no download.",
                     )
                     .color(Color32::GRAY),
                 );
