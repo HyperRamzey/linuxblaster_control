@@ -2,8 +2,8 @@
 //!
 //! The G6 exposes two useful outputs:
 //! * its ALSA "pro" sink for direct stereo playback, and
-//! * a virtual 7.1 sink backed by the Creative MatrixEncoder LADSPA
-//!   plugin from the separate g6-re project.
+//! * a virtual 7.1 sink backed by the vendored Creative MatrixEncoder
+//!   LADSPA plugin (MIT, `vendor/g6ct`).
 //!
 //! The virtual sink receives the 7.1 PCM and downmixes it with a 1:1 code
 //! port of the Sound BlasterX G6 downmixer APO (`CMatrixEncoderEfxMod` from
@@ -11,15 +11,13 @@
 //! the only difference.
 //!
 //! This module only shells out to `pactl` and `systemctl`; it never
-//! processes audio. The LADSPA plugin is GPL-3.0 and intentionally stays
-//! outside this MIT-licensed crate. The installer copies or builds it
-//! locally and writes a PipeWire filter-chain config for the G6 sink that
-//! is actually present on this machine.
+//! processes audio. `build.rs` compiles the plugin into the binary; the
+//! installer writes it to `~/.local/lib/linuxblaster/` and generates a
+//! PipeWire filter-chain config for the G6 sink that is actually present.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -31,6 +29,16 @@ pub const VIRTUAL_SINK_NAME: &str = "g6_ct_downmix";
 pub const VIRTUAL_SINK_DESCRIPTION: &str = "G6 Creative MatrixEncoder 7.1";
 pub const PLUGIN_FILE: &str = "libg6ct_ladspa_f64.so";
 pub const PLUGIN_FALLBACK_FILE: &str = "libg6ct_ladspa.so";
+
+/// The f64 LADSPA plugin built from `vendor/g6ct` by `build.rs`. Carrying
+/// the bytes in the binary means installation needs neither a source tree
+/// nor a download.
+static EMBEDDED_PLUGIN: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/libg6ct_ladspa_f64.so"));
+
+pub fn embedded_plugin() -> &'static [u8] {
+    EMBEDDED_PLUGIN
+}
 
 /// User settings owned by the System pane. Kept separately from the G6
 /// device snapshot so the device JSON stays compatible.
@@ -231,18 +239,17 @@ pub fn plugin_install_path() -> PathBuf {
         .join(PLUGIN_FILE)
 }
 
-/// The plugin currently available on this machine. The g6-re source tree
-/// wins over the installed copy, so a rebuilt plugin is picked up by the
-/// next install.
+/// The plugin currently available on this machine. The installed copy
+/// comes first; the old g6-re paths stay as a fallback for existing setups.
 pub fn find_plugin() -> Option<PathBuf> {
     let home = home_dir();
     let candidates = [
+        plugin_install_path(),
         home.join("g6-re/port").join(PLUGIN_FILE),
         home.join("g6/port").join(PLUGIN_FILE),
-        plugin_install_path(),
+        home.join(".local/lib/linuxblaster").join(PLUGIN_FALLBACK_FILE),
         home.join("g6-re/port").join(PLUGIN_FALLBACK_FILE),
         home.join("g6/port").join(PLUGIN_FALLBACK_FILE),
-        home.join(".local/lib/linuxblaster").join(PLUGIN_FALLBACK_FILE),
         PathBuf::from("/usr/local/lib/linuxblaster").join(PLUGIN_FILE),
         PathBuf::from("/usr/lib/linuxblaster").join(PLUGIN_FILE),
     ];
@@ -456,12 +463,11 @@ pub fn switch_output(use_virtual: bool, preserve_volume: bool) -> Result<(), Str
     Ok(())
 }
 
-/// Finds or builds the g6ct plugin, copies it to a stable path, writes
-/// the PipeWire drop-in for the current G6 sink, and reloads PipeWire.
+/// Writes the bundled plugin to its stable path, writes the PipeWire
+/// drop-in for the current G6 sink, and reloads PipeWire.
 ///
-/// The plugin is GPL-3.0 and stays a separate component: this function
-/// never downloads native code and never puts the plugin in the app's
-/// repository or release.
+/// The plugin is part of this MIT-licensed project and is compiled into
+/// the binary, so installation needs neither a source tree nor a download.
 pub fn install_virtual_sink() -> Result<String, String> {
     let plugin = ensure_plugin()?;
 
@@ -523,78 +529,14 @@ pub fn install_virtual_sink() -> Result<String, String> {
 }
 
 fn ensure_plugin() -> Result<PathBuf, String> {
-    if let Some(source) = find_plugin() {
-        return copy_plugin(&source);
+    let destination = plugin_install_path();
+    let current = fs::read(&destination)
+        .map(|existing| existing == EMBEDDED_PLUGIN)
+        .unwrap_or(false);
+    if current {
+        return Ok(destination);
     }
-
-    // The user already has the g6-re source tree; build the f64 plugin
-    // locally instead of downloading a binary.
-    let source_dir = home_dir().join("g6-re/port");
-    if source_dir.join("Makefile").is_file() {
-        let output = Command::new("make")
-            .arg("-C")
-            .arg(&source_dir)
-            .arg(PLUGIN_FILE)
-            .output()
-            .map_err(|error| {
-                format!("Couldn't run make in {}: {}", source_dir.display(), error)
-            })?;
-        if !output.status.success() {
-            return Err(format!(
-                "Building {} failed:\n{}",
-                PLUGIN_FILE,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-    }
-
-    if let Some(source) = find_plugin() {
-        return copy_plugin(&source);
-    }
-
-    Err(format!(
-        "The g6ct LADSPA plugin was not found. Build it in ~/g6-re/port with \
-         `make {}`, or copy it to {}.",
-        PLUGIN_FILE,
-        plugin_install_path().display()
-    ))
-}
-
-fn copy_plugin(source: &Path) -> Result<PathBuf, String> {
-    let file_name = source
-        .file_name()
-        .ok_or_else(|| format!("Invalid plugin path: {}", source.display()))?;
-    let destination = home_dir()
-        .join(".local/lib/linuxblaster")
-        .join(file_name);
-
-    if source != destination {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!("Couldn't create {}: {}", parent.display(), error)
-            })?;
-        }
-        fs::copy(source, &destination).map_err(|error| {
-            format!(
-                "Couldn't copy {} to {}: {}",
-                source.display(),
-                destination.display(),
-                error
-            )
-        })?;
-        fs::set_permissions(
-            &destination,
-            fs::Permissions::from_mode(0o755),
-        )
-        .map_err(|error| {
-            format!(
-                "Couldn't make {} executable: {}",
-                destination.display(),
-                error
-            )
-        })?;
-    }
-
+    write_atomic_bytes(&destination, EMBEDDED_PLUGIN)?;
     Ok(destination)
 }
 
@@ -607,8 +549,8 @@ pub fn config_contents(plugin: &Path, target: &str) -> String {
         r#"# Sound BlasterX G6 - Creative "MatrixEncoder" 7.1 -> binaural stereo.
 #
 # Generated by Linuxblaster Control's System pane.
-# The LADSPA plugin is a separate GPL-3.0 component built from the
-# g6-re project. This app copies it locally; it does not redistribute it.
+# The LADSPA plugin is part of this project (MIT) and is bundled with
+# the app; the installer writes it to ~/.local/lib/linuxblaster/.
 #
 # 7.1 PCM arrives at this sink and is downmixed by a 1:1 code port of the
 # Sound BlasterX G6 downmixer APO (CMatrixEncoderEfxMod, KSUSBAPO64.dll).
@@ -666,12 +608,16 @@ fn escape_pipewire_string(value: &str) -> String {
 }
 
 fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    write_atomic_bytes(path, contents.as_bytes())
+}
+
+fn write_atomic_bytes(path: &Path, contents: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!("Couldn't create {}: {}", parent.display(), error)
         })?;
     }
-    let temporary = path.with_extension("conf.tmp");
+    let temporary = path.with_extension("tmp");
     fs::write(&temporary, contents).map_err(|error| {
         format!("Couldn't write {}: {}", temporary.display(), error)
     })?;
@@ -832,7 +778,20 @@ mod tests {
         ));
         assert!(config.contains("node.name        = \"g6_ct_downmix\""));
         assert!(config.contains("audio.channels   = 8"));
-        assert!(config.contains("GPL-3.0"));
+        assert!(config.contains("MIT"));
+    }
+
+    #[test]
+    fn embedded_plugin_is_a_shared_object() {
+        let plugin = embedded_plugin();
+        assert!(plugin.len() > 1024, "plugin is suspiciously small");
+        assert_eq!(&plugin[..4], b"\x7fELF", "not an ELF file");
+        assert!(
+            plugin
+                .windows(b"ladspa_descriptor".len())
+                .any(|window| window == b"ladspa_descriptor"),
+            "the LADSPA entry point is missing"
+        );
     }
 
     #[test]
