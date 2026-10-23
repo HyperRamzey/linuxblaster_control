@@ -212,7 +212,7 @@ No separate daemon is needed: the app is the controller and restores its own sta
 
 The System pane can install a virtual 7.1 sink for headphones. It is a PipeWire filter-chain that feeds the G6 Pro output. 7.1 PCM arrives at the sink and is downmixed by a **1:1 code port of the Sound BlasterX G6 downmixer APO** (`CMatrixEncoderEfxMod` from `KSUSBAPO64.dll`, fully decoded and verified bit-exact in g6-re). The port runs in **f64 instead of the original f32** — the only difference.
 
-The installer looks for the plugin sources in `~/g6-re/port`, builds `libg6ct_ladspa_f64.so`, copies it to `~/.local/lib/linuxblaster/`, writes a PipeWire config for the G6 sink that is actually attached, and restarts `pipewire.service`. The plugin is GPL-3.0 and stays a separate program; this app is MIT and does not redistribute or download native code at runtime. Installing it briefly interrupts audio.
+The installer ships the plugin with the app: `libg6ct_ladspa_f64.so` is compiled from the vendored MIT sources in `vendor/g6ct/`, carried inside the binary, and written to `~/.local/lib/linuxblaster/` on install. No source checkout, build step, or download is needed. The installer then writes a PipeWire config for the G6 sink that is actually attached and restarts `pipewire.service`. Installing it briefly interrupts audio.
 
 The toggle routes the default output between the G6 Pro sink (direct) and the virtual sink. When **sync volume** is enabled, the active sink's PipeWire volume is the single volume control and the inactive gain stage stays at 100%; the volume is carried over when the output switches.
 
@@ -222,7 +222,7 @@ The **SINAD fix** limits the hardware Speaker control to raw `124/128` — 97% o
 
 ### Building from Source
 
-You need a Rust toolchain and these development packages:
+You need a Rust toolchain, a C compiler (`cc`) for the vendored g6ct plugin, and these development packages:
 
 | Distro          | Packages                                    |
 |-----------------|---------------------------------------------|
@@ -311,4 +311,4 @@ It will mostly be maintained by an LLM under my supervision from v2.2 and onward
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for details. The vendored g6ct downmixer in `vendor/g6ct/` is MIT as well.
