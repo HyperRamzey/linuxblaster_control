@@ -74,6 +74,11 @@ static INSTALL_JOB: LazyLock<Mutex<Option<InstallJob>>> =
     LazyLock::new(|| Mutex::new(None));
 static INSTALL_MESSAGE: LazyLock<Mutex<Option<Result<String, String>>>> =
     LazyLock::new(|| Mutex::new(None));
+/// The installer restarts PipeWire; the G6 sink disappears for a moment
+/// and `Status::refresh` would report it as missing. Hide errors for a
+/// short settle window after the job ends.
+static STATUS_ERROR_SETTLE_UNTIL: LazyLock<Mutex<Option<Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
 /// One-time startup gain staging, once the first system poll is in.
 static STARTUP_POLICY_APPLIED: LazyLock<Mutex<bool>> =
     LazyLock::new(|| Mutex::new(false));
@@ -463,6 +468,8 @@ fn poll_install_job(ctx: &egui::Context) {
             Err("The installer thread panicked.".to_owned())
         });
         *INSTALL_MESSAGE.lock().unwrap() = Some(result);
+        *STATUS_ERROR_SETTLE_UNTIL.lock().unwrap() =
+            Some(Instant::now() + Duration::from_secs(3));
         *LAST_SYSTEM_REFRESH.lock().unwrap() = None;
         ctx.request_repaint();
     }
@@ -594,6 +601,13 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
     let mut settings = *SYSTEM_SETTINGS.lock().unwrap();
     let install_busy = INSTALL_JOB.lock().unwrap().is_some();
     let install_message = INSTALL_MESSAGE.lock().unwrap().clone();
+    let settling = STATUS_ERROR_SETTLE_UNTIL
+        .lock()
+        .unwrap()
+        .is_some_and(|until| Instant::now() < until);
+    if install_busy || settling {
+        status.error = None;
+    }
 
     ScrollArea::vertical()
         .auto_shrink([false, false])
