@@ -494,6 +494,11 @@ pub fn install_virtual_sink() -> Result<String, String> {
 
     restart_pipewire()?;
     wait_for_sink(VIRTUAL_SINK_NAME, Duration::from_secs(10))?;
+    // The G6 re-enumerates after the restart and can take longer than the
+    // filter-chain node. Wait for it before restoring the previous default:
+    // otherwise the restore is skipped and PipeWire re-applies its stored
+    // default, which is usually the virtual sink.
+    let _ = wait_for_sink(&g6, Duration::from_secs(5));
 
     // Keep the user's previous default. A full PipeWire restart can
     // otherwise leave the virtual sink or the G6 sink selected by itself.
