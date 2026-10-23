@@ -16,11 +16,17 @@ mod tests;
 
 pub mod features;
 pub mod mixer;
+pub mod system;
 pub use features::{Feature, FeatureId, MIC_EQ_PRESETS, ValueKind};
 
 pub const VENDOR_ID: u16 = 0x041e;
 pub const PRODUCT_ID: u16 = 0x3256;
 pub const INTERFACE: i32 = 4;
+
+/// The G6's hardware `Speaker` control has a raw range of 0..128.
+/// Raw 124 is exactly -2.00 dB, which is the level where the G6's
+/// full-scale SINAD degradation is avoided.
+pub const SINAD_VOLUME_CAP: f32 = 124.0 / 128.0;
 
 /// Default base directory path
 /// On Windows: %LOCALAPPDATA%/linuxblaster/
@@ -96,6 +102,11 @@ pub struct BlasterXG6 {
     /// snapshot is stale. Not part of the serialized state/profile.
     #[serde(skip)]
     writes: AtomicU64,
+    /// Optional upper bound for the hardware `Speaker` volume, as a
+    /// fraction of its raw range. The GUI sets this from the SINAD fix
+    /// setting; it is not part of the serialized device state.
+    #[serde(skip)]
+    volume_cap: Mutex<Option<f32>>,
 }
 
 impl BlasterXG6 {
@@ -136,6 +147,7 @@ impl BlasterXG6 {
         let blaster = Self {
             features: features::all_features(),
             writes: AtomicU64::new(0),
+            volume_cap: Mutex::new(None),
         };
         blaster.read_state_from_device();
         Ok(blaster)
@@ -248,6 +260,47 @@ impl BlasterXG6 {
         features::UNSOLICITED.lock().unwrap().clear();
     }
 
+    /// Sets an upper bound for the hardware `Speaker` volume.
+    ///
+    /// The value is a fraction of the raw 0..128 range. Pass `None` to
+    /// remove the cap. Used by the SINAD fix, which stops the DAC at the
+    /// -2.00 dB point (raw 124) instead of full scale.
+    pub fn set_volume_cap(&self, cap: Option<f32>) {
+        *self.volume_cap.lock().unwrap() =
+            cap.map(|value| value.clamp(0.0, 1.0));
+    }
+
+    /// The current hardware volume cap, if any.
+    pub fn volume_cap(&self) -> Option<f32> {
+        *self.volume_cap.lock().unwrap()
+    }
+
+    /// Pulls the hardware `Speaker` volume down to the cap if a knob or
+    /// another client raised it above the limit. Returns `true` if a
+    /// write was made.
+    pub fn enforce_volume_cap(&self) -> bool {
+        let Some(cap) = self.volume_cap() else {
+            return false;
+        };
+        let current = self.feature(FeatureId::SpeakerVolume).value();
+        if current.is_nan() || current <= cap + 1e-4 {
+            return false;
+        }
+        match self.set_feature(FeatureId::SpeakerVolume, Some(cap)) {
+            Ok(()) => {
+                debug!(
+                    "Hardware volume {} exceeded the cap {}; lowered it",
+                    current, cap
+                );
+                true
+            }
+            Err(error) => {
+                warn!("Couldn't enforce the hardware volume cap: {}", error);
+                false
+            }
+        }
+    }
+
     /// Re-reads only the ALSA mixer features.
     /// They can change outside of this app (volume knob, pavucontrol, ...).
     pub fn read_mixer_state(&self) {
@@ -261,6 +314,8 @@ impl BlasterXG6 {
                 feature.read_from_device();
             }
         }
+        // The physical knob and other clients can move the Speaker control.
+        self.enforce_volume_cap();
     }
 
     /// Applies state the device pushed on its own
@@ -361,6 +416,17 @@ impl BlasterXG6 {
                     1.0
                 }
             }
+        };
+
+        // The SINAD fix caps the hardware Speaker control. Clamp here so
+        // every write path (sliders, profiles, restore, guard) obeys it.
+        let actual_value = if id == FeatureId::SpeakerVolume {
+            match self.volume_cap() {
+                Some(cap) => actual_value.min(cap),
+                None => actual_value,
+            }
+        } else {
+            actual_value
         };
 
         debug!("set_feature: {} = {}", id, actual_value);
@@ -523,6 +589,7 @@ impl BlasterXG6 {
                 .cloned()
                 .collect(),
             writes: AtomicU64::new(0),
+            volume_cap: Mutex::new(None),
         };
 
         if let Some(parent) = path.parent() {
