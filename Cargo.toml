@@ -1,6 +1,6 @@
 [package]
 name = "linuxblaster_control"
-version = "2.2.0"
+version = "2.4.0"
 edition = "2024"
 description = "Control the Creative Sound BlasterX G6 on Linux: SBX, equalizer, microphone, mixer, lighting"
 license = "MIT"
