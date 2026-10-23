@@ -2,8 +2,8 @@
 
 use linuxblaster_control::{
     BlasterXG6, ConnectError, DEFAULT_BASE_PATH, FeatureId, LinkState,
-    MIC_EQ_PRESETS, UDEV_RULE, UDEV_RULE_PATH, ValueKind,
-    remember_last_profile,
+    MIC_EQ_PRESETS, SINAD_VOLUME_CAP, UDEV_RULE, UDEV_RULE_PATH, ValueKind,
+    remember_last_profile, system,
 };
 use eframe::egui::{
     self, Button, Color32, RichText, Vec2, Vec2b,
@@ -17,6 +17,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use std::cmp::Reverse;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
 
@@ -52,6 +53,32 @@ static LAST_SAVED_WRITES: LazyLock<Mutex<Option<u64>>> =
 static LAST_STATE_SAVE: LazyLock<Mutex<Instant>> =
     LazyLock::new(|| Mutex::new(Instant::now()));
 
+/// Persisted System-pane settings. Loaded once; saved on every change.
+static SYSTEM_SETTINGS: LazyLock<Mutex<system::Settings>> =
+    LazyLock::new(|| Mutex::new(system::Settings::load()));
+/// Cached `pactl` state, refreshed every couple of seconds.
+static SYSTEM_STATUS: LazyLock<Mutex<system::Status>> =
+    LazyLock::new(|| Mutex::new(system::Status::default()));
+static LAST_SYSTEM_REFRESH: LazyLock<Mutex<Option<Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
+/// Slider value while the user drags it; avoids a stale poll fighting it.
+static SYSTEM_VOLUME_UI: LazyLock<Mutex<f32>> =
+    LazyLock::new(|| Mutex::new(100.0));
+static SYSTEM_VOLUME_EDITING: LazyLock<Mutex<bool>> =
+    LazyLock::new(|| Mutex::new(false));
+static LAST_SYSTEM_VOLUME_WRITE: LazyLock<Mutex<Instant>> =
+    LazyLock::new(|| Mutex::new(Instant::now()));
+/// Background installer job. PipeWire is restarted by it, which should
+/// not freeze the UI thread.
+type InstallJob = JoinHandle<Result<String, String>>;
+static INSTALL_JOB: LazyLock<Mutex<Option<InstallJob>>> =
+    LazyLock::new(|| Mutex::new(None));
+static INSTALL_MESSAGE: LazyLock<Mutex<Option<Result<String, String>>>> =
+    LazyLock::new(|| Mutex::new(None));
+/// One-time startup gain staging, once the first system poll is in.
+static STARTUP_POLICY_APPLIED: LazyLock<Mutex<bool>> =
+    LazyLock::new(|| Mutex::new(false));
+
 /// How often the UI checks for state the device pushed on its own
 /// (hardware buttons, cascading changes after writes).
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -65,6 +92,10 @@ const DEVICE_MONITOR_INTERVAL: Duration = Duration::from_secs(2);
 /// Writes the last-state snapshot at most this often while a setting is
 /// being dragged. Slider drags emit a write on every frame.
 const LAST_STATE_SAVE_INTERVAL: Duration = Duration::from_secs(2);
+/// `pactl` spawns a process per call, so the system snapshot is cached.
+const SYSTEM_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+/// Slider drags emit changes on every frame; throttle `pactl` writes.
+const SYSTEM_VOLUME_WRITE_INTERVAL: Duration = Duration::from_millis(50);
 
 
 pub struct BlasterApp(pub BlasterXG6);
@@ -79,10 +110,14 @@ impl eframe::App for BlasterApp {
         self.0.process_device_events();
         poll_device(&self.0);
         persist_last_state(&self.0);
+        poll_install_job(ctx);
+        poll_system(ctx);
+        apply_startup_gain_policy(&self.0);
         {
             let mut last_refresh = LAST_MIXER_REFRESH.lock().unwrap();
             if last_refresh.elapsed() >= MIXER_REFRESH_INTERVAL {
                 self.0.read_mixer_state();
+                enforce_sync_policy(&self.0);
                 *last_refresh = Instant::now();
             }
         }
@@ -199,11 +234,30 @@ impl eframe::App for BlasterApp {
                     };
                     ui.label(format!("Output: {}", output));
 
+                    ui.separator();
+                    let sink = {
+                        let status = SYSTEM_STATUS.lock().unwrap();
+                        match status.default_sink.as_deref() {
+                            Some(system::VIRTUAL_SINK_NAME) => {
+                                "7.1".to_owned()
+                            }
+                            Some(name)
+                                if Some(name)
+                                    == status.g6_sink.as_deref() =>
+                            {
+                                "G6".to_owned()
+                            }
+                            Some(_) => "other".to_owned(),
+                            None => "?".to_owned(),
+                        }
+                    };
+                    ui.label(format!("Sink: {}", sink));
+
                     ui.with_layout(
                         Layout::right_to_left(Align::Center),
                         |ui| {
                             ui.label(format!(
-                                "Link reconnects: {}",
+                                "Reconnects: {}",
                                 *DEVICE_RECONNECTS.lock().unwrap()
                             ));
                         },
@@ -219,6 +273,7 @@ impl eframe::App for BlasterApp {
                 nav_pane(&self.0, ui, "Recording", None, true);
                 nav_pane(&self.0, ui, "Decoder", None, true);
                 nav_pane(&self.0, ui, "Mixer", None, true);
+                nav_pane(&self.0, ui, "System", None, true);
                 nav_pane(&self.0, ui, "Lighting", Some(FeatureId::LightingToggle), true);
                 ui.add_enabled_ui(!direct, |ui| {
                     nav_pane(
@@ -273,6 +328,9 @@ impl eframe::App for BlasterApp {
                 }
                 "Mixer" => {
                     mixer_pane(&self.0, ui);
+                }
+                "System" => {
+                    system_pane(&self.0, ui);
                 }
                 "Lighting" => {
                     lighting_pane(&self.0, ui);
@@ -332,6 +390,667 @@ fn persist_on_exit(blaster: &BlasterXG6) {
     if let Err(error) = blaster.save_last_state() {
         error!("Couldn't save the last state on exit: {}", error);
     }
+}
+
+fn sync_volume_enabled() -> bool {
+    SYSTEM_SETTINGS.lock().unwrap().sync_volume
+}
+
+fn sinad_fix_enabled() -> bool {
+    SYSTEM_SETTINGS.lock().unwrap().sinad_fix
+}
+
+fn save_system_settings(settings: &system::Settings) {
+    if let Err(error) = settings.save() {
+        error!("Couldn't save the System settings: {}", error);
+    }
+}
+
+/// Refreshes the cached `pactl` state at most every
+/// [`SYSTEM_REFRESH_INTERVAL`]. The UI reads the cache, never `pactl`.
+fn poll_system(ctx: &egui::Context) {
+    let due = {
+        let mut last = LAST_SYSTEM_REFRESH.lock().unwrap();
+        match *last {
+            Some(instant)
+                if instant.elapsed() < SYSTEM_REFRESH_INTERVAL =>
+            {
+                false
+            }
+            _ => {
+                *last = Some(Instant::now());
+                true
+            }
+        }
+    };
+    if !due {
+        return;
+    }
+
+    let status = system::Status::refresh();
+    if !*SYSTEM_VOLUME_EDITING.lock().unwrap()
+        && let Some(volume) = status.active_volume
+    {
+        *SYSTEM_VOLUME_UI.lock().unwrap() = volume;
+    }
+    *SYSTEM_STATUS.lock().unwrap() = status;
+    ctx.request_repaint();
+}
+
+/// A blocking refresh for actions that just changed the system state
+/// (sink switch, checkbox toggles). These are user-initiated, so the
+/// short `pactl` round trip is preferable to showing stale state.
+fn refresh_system_now() {
+    let status = system::Status::refresh();
+    if !*SYSTEM_VOLUME_EDITING.lock().unwrap()
+        && let Some(volume) = status.active_volume
+    {
+        *SYSTEM_VOLUME_UI.lock().unwrap() = volume;
+    }
+    *SYSTEM_STATUS.lock().unwrap() = status;
+    *LAST_SYSTEM_REFRESH.lock().unwrap() = Some(Instant::now());
+}
+
+fn poll_install_job(ctx: &egui::Context) {
+    let running = {
+        let job = INSTALL_JOB.lock().unwrap();
+        match job.as_ref() {
+            Some(handle) => !handle.is_finished(),
+            None => return,
+        }
+    };
+    if running {
+        ctx.request_repaint_after(Duration::from_millis(100));
+        return;
+    }
+
+    let handle = INSTALL_JOB.lock().unwrap().take();
+    if let Some(handle) = handle {
+        let result = handle.join().unwrap_or_else(|_| {
+            Err("The installer thread panicked.".to_owned())
+        });
+        *INSTALL_MESSAGE.lock().unwrap() = Some(result);
+        *LAST_SYSTEM_REFRESH.lock().unwrap() = None;
+        ctx.request_repaint();
+    }
+}
+
+/// Applies the persisted volume policy once per connection. The cap is
+/// applied immediately; sync mode then converts the current hardware
+/// volume into the active sink volume without a loudness jump.
+fn apply_startup_gain_policy(blaster: &BlasterXG6) {
+    let mut applied = STARTUP_POLICY_APPLIED.lock().unwrap();
+    if *applied {
+        return;
+    }
+    *applied = true;
+    drop(applied);
+
+    let settings = *SYSTEM_SETTINGS.lock().unwrap();
+    blaster.set_volume_cap(if settings.sinad_fix {
+        Some(SINAD_VOLUME_CAP)
+    } else {
+        None
+    });
+    if settings.sinad_fix {
+        let _ = blaster.enforce_volume_cap();
+    }
+    if settings.sync_volume {
+        apply_single_gain_stage(blaster);
+        enforce_sync_policy(blaster);
+    }
+}
+
+/// Moves the variable gain into the active PipeWire sink and pins the
+/// G6 hardware Speaker control at the SINAD cap (or 0 dB if the fix is
+/// off). The sink volume is adjusted so the product of both stages stays
+/// the same.
+fn apply_single_gain_stage(blaster: &BlasterXG6) {
+    let settings = *SYSTEM_SETTINGS.lock().unwrap();
+    if !settings.sync_volume {
+        return;
+    }
+
+    let target_hw = if settings.sinad_fix {
+        SINAD_VOLUME_CAP
+    } else {
+        1.0
+    };
+    let status = SYSTEM_STATUS.lock().unwrap().clone();
+    let Some(active) = status.active_sink().map(str::to_owned) else {
+        return;
+    };
+    let hardware = blaster.feature(FeatureId::SpeakerVolume).value();
+
+    if !hardware.is_nan()
+        && let Ok(sink) = system::sink_volume(&active)
+    {
+        let target_sink =
+            (sink * hardware / target_hw).clamp(0.0, 100.0);
+        if (target_sink - sink).abs() > 0.05
+            && let Err(error) =
+                system::set_sink_volume(&active, target_sink)
+        {
+            warn!(
+                "Couldn't preserve the system volume while syncing: {}",
+                error
+            );
+        }
+    }
+
+    blaster.set_volume_cap(if settings.sinad_fix {
+        Some(SINAD_VOLUME_CAP)
+    } else {
+        None
+    });
+    if !hardware.is_nan()
+        && let Err(error) =
+            blaster.set_feature(FeatureId::SpeakerVolume, Some(target_hw))
+    {
+        warn!("Couldn't set the fixed hardware volume: {}", error);
+    }
+}
+
+/// Keeps sync mode coherent while it is active: the inactive G6 gain
+/// stage stays at 100% and the hardware Speaker stays at the cap (or
+/// 0 dB). A hardware knob move is corrected on the next mixer refresh.
+fn enforce_sync_policy(blaster: &BlasterXG6) {
+    let settings = *SYSTEM_SETTINGS.lock().unwrap();
+    if !settings.sync_volume {
+        return;
+    }
+    if !linuxblaster_control::mixer::is_available() {
+        return;
+    }
+
+    let status = SYSTEM_STATUS.lock().unwrap().clone();
+    if let Some(active) = status.active_sink() {
+        if active == system::VIRTUAL_SINK_NAME
+            && let Some(g6) = status.g6_sink.as_deref()
+            && status
+                .g6_volume
+                .is_some_and(|volume| (volume - 100.0).abs() > 0.5)
+        {
+            let _ = system::set_sink_volume(g6, 100.0);
+        } else if active != system::VIRTUAL_SINK_NAME
+            && status.virtual_installed
+            && status
+                .virtual_volume
+                .is_some_and(|volume| (volume - 100.0).abs() > 0.5)
+        {
+            let _ = system::set_sink_volume(
+                system::VIRTUAL_SINK_NAME,
+                100.0,
+            );
+        }
+    }
+
+    let target = if settings.sinad_fix {
+        SINAD_VOLUME_CAP
+    } else {
+        1.0
+    };
+    let current = blaster.feature(FeatureId::SpeakerVolume).value();
+    if !current.is_nan() && (current - target).abs() > 1e-4 {
+        let _ = blaster.set_feature(FeatureId::SpeakerVolume, Some(target));
+    }
+}
+
+fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
+    let mut status = SYSTEM_STATUS.lock().unwrap().clone();
+    let mut settings = *SYSTEM_SETTINGS.lock().unwrap();
+    let install_busy = INSTALL_JOB.lock().unwrap().is_some();
+    let install_message = INSTALL_MESSAGE.lock().unwrap().clone();
+
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.vertical_centered_justified(|ui| {
+                section_header(ui, "Virtual 7.1 sink (headphones)");
+                ui.label(
+                    RichText::new(
+                        "The virtual sink is a PipeWire filter-chain, not the \
+                         G6's DSP: 7.1 PCM arrives at the sink and is \
+                         downmixed by a 1:1 code port of the Sound BlasterX \
+                         G6 downmixer APO (CMatrixEncoderEfxMod from \
+                         KSUSBAPO64.dll). The port runs in f64 instead of the \
+                         original f32 — the only difference.",
+                    )
+                    .color(Color32::GRAY),
+                );
+                ui.add_space(6.0);
+
+                Grid::new("system_sink_status")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Sink");
+                        if status.virtual_installed {
+                            ui.colored_label(
+                                Color32::from_rgb(80, 200, 120),
+                                "installed",
+                            );
+                        } else if status.config_present {
+                            ui.colored_label(
+                                Color32::from_rgb(230, 190, 80),
+                                "config present, not loaded",
+                            );
+                        } else {
+                            ui.colored_label(
+                                Color32::from_rgb(230, 100, 100),
+                                "not installed",
+                            );
+                        }
+                        ui.end_row();
+
+                        ui.label("Default output");
+                        let default = match status.default_sink.as_deref()
+                        {
+                            Some(system::VIRTUAL_SINK_NAME) => {
+                                "Virtual 7.1".to_owned()
+                            }
+                            Some(name)
+                                if Some(name)
+                                    == status.g6_sink.as_deref() =>
+                            {
+                                "G6 Pro (direct)".to_owned()
+                            }
+                            Some(name) => name.to_owned(),
+                            None => "unknown".to_owned(),
+                        };
+                        ui.label(default);
+                        ui.end_row();
+
+                        ui.label("Plugin");
+                        let plugin_label = status
+                            .plugin
+                            .as_ref()
+                            .and_then(|path| path.file_name())
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "not found".to_owned());
+                        ui.label(plugin_label).on_hover_text(
+                            status
+                                .plugin
+                                .as_ref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| {
+                                    "Install will build it from ~/g6-re/port"
+                                        .to_owned()
+                                }),
+                        );
+                        ui.end_row();
+
+                        ui.label("Config");
+                        let config_label = if status.config_present {
+                            "written"
+                        } else {
+                            "not written"
+                        };
+                        ui.label(config_label).on_hover_text(
+                            system::config_path().display().to_string(),
+                        );
+                        ui.end_row();
+
+                        if let Some(error) = &status.error {
+                            ui.label("Problem");
+                            ui.colored_label(
+                                Color32::from_rgb(230, 100, 100),
+                                error,
+                            );
+                            ui.end_row();
+                        }
+                    });
+
+                ui.add_space(6.0);
+                if install_busy {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(
+                                "Installing and reloading PipeWire... \
+                                 audio drops for a moment.",
+                            )
+                            .color(Color32::GRAY),
+                        );
+                    });
+                } else {
+                    let can_install = status.g6_sink.is_some();
+                    let label = if status.virtual_installed {
+                        "Reinstall / repair virtual 7.1 sink"
+                    } else {
+                        "Install virtual 7.1 sink"
+                    };
+                    let button = ui.add_enabled(
+                        can_install,
+                        Button::new(label),
+                    );
+                    if button.clicked() {
+                        *INSTALL_MESSAGE.lock().unwrap() = None;
+                        let handle = std::thread::spawn(
+                            system::install_virtual_sink,
+                        );
+                        *INSTALL_JOB.lock().unwrap() = Some(handle);
+                        *LAST_SYSTEM_REFRESH.lock().unwrap() = None;
+                    }
+                    if !can_install {
+                        ui.label(
+                            RichText::new(
+                                "Connect the G6 first: the installer needs \
+                                 the sink name of the attached device.",
+                            )
+                            .color(Color32::from_rgb(230, 190, 80)),
+                        );
+                    }
+                }
+
+                if let Some(result) = &install_message {
+                    match result {
+                        Ok(message) => {
+                            ui.colored_label(
+                                Color32::from_rgb(80, 200, 120),
+                                message,
+                            );
+                        }
+                        Err(message) => {
+                            ui.colored_label(
+                                Color32::from_rgb(230, 100, 100),
+                                message,
+                            );
+                        }
+                    }
+                }
+
+                ui.add_space(8.0);
+                let mut use_virtual = status.default_sink.as_deref()
+                    == Some(system::VIRTUAL_SINK_NAME);
+                let can_switch = status.virtual_installed
+                    && status.g6_sink.is_some()
+                    && !install_busy;
+                let switch = ui.add_enabled(
+                    can_switch,
+                    egui::Checkbox::new(
+                        &mut use_virtual,
+                        "Use virtual 7.1 sink (headphones)",
+                    ),
+                );
+                if switch.changed() {
+                    match system::switch_output(
+                        use_virtual,
+                        settings.sync_volume,
+                    ) {
+                        Ok(()) => {
+                            refresh_system_now();
+                            status =
+                                SYSTEM_STATUS.lock().unwrap().clone();
+                            if settings.sync_volume {
+                                enforce_sync_policy(blaster);
+                            }
+                        }
+                        Err(error) => {
+                            SYSTEM_STATUS.lock().unwrap().error =
+                                Some(error);
+                            status =
+                                SYSTEM_STATUS.lock().unwrap().clone();
+                        }
+                    }
+                }
+                ui.label(
+                    RichText::new(
+                        "Off routes the default sink back to the G6 Pro \
+                         device. Current application streams are moved with it.",
+                    )
+                    .color(Color32::GRAY),
+                );
+
+                // If another sink owns the default, offer a direct route
+                // so the checkbox is not a two-click puzzle.
+                let g6_is_default = status
+                    .g6_sink
+                    .as_deref()
+                    .is_some_and(|g6| {
+                        status.default_sink.as_deref() == Some(g6)
+                    });
+                if status.virtual_installed
+                    && !g6_is_default
+                    && status.default_sink.as_deref()
+                        != Some(system::VIRTUAL_SINK_NAME)
+                    && ui.button("Use G6 Pro (direct)").clicked()
+                {
+                    match system::switch_output(
+                        false,
+                        settings.sync_volume,
+                    ) {
+                        Ok(()) => {
+                            refresh_system_now();
+                            status =
+                                SYSTEM_STATUS.lock().unwrap().clone();
+                        }
+                        Err(error) => {
+                            SYSTEM_STATUS.lock().unwrap().error =
+                                Some(error);
+                            status =
+                                SYSTEM_STATUS.lock().unwrap().clone();
+                        }
+                    }
+                }
+
+                ui.add_space(10.0);
+                section_header(ui, "Volume");
+                if ui
+                    .checkbox(
+                        &mut settings.sync_volume,
+                        "Sync volume with the active system sink",
+                    )
+                    .changed()
+                {
+                    save_system_settings(&settings);
+                    *SYSTEM_SETTINGS.lock().unwrap() = settings;
+                    if settings.sync_volume {
+                        refresh_system_now();
+                        status =
+                            SYSTEM_STATUS.lock().unwrap().clone();
+                        apply_single_gain_stage(blaster);
+                        enforce_sync_policy(blaster);
+                        refresh_system_now();
+                        status =
+                            SYSTEM_STATUS.lock().unwrap().clone();
+                    }
+                }
+                ui.label(
+                    RichText::new(
+                        "The active PipeWire sink is the single volume \
+                         control. The G6 hardware Speaker stays at the \
+                         SINAD cap (or 0 dB if the fix is off), so there is \
+                         only one variable gain stage before the DAC.",
+                    )
+                    .color(Color32::GRAY),
+                );
+
+                if settings.sync_volume {
+                    match status.active_sink().map(str::to_owned) {
+                        Some(active) => {
+                            let mut volume =
+                                *SYSTEM_VOLUME_UI.lock().unwrap();
+                            let active_label = if active
+                                == system::VIRTUAL_SINK_NAME
+                            {
+                                "System volume (virtual 7.1)"
+                            } else {
+                                "System volume (G6 Pro)"
+                            };
+
+                            Grid::new("system_volume_grid")
+                                .num_columns(2)
+                                .spacing([12.0, 4.0])
+                                .show(ui, |ui| {
+                                    ui.label(active_label);
+                                    let drag = ui.add(drag_value!(
+                                        &mut volume,
+                                        suffix = "%",
+                                        range = 0.0..=100.0
+                                    ));
+                                    ui.end_row();
+
+                                    ui.label("");
+                                    fit_slider_to_column(ui);
+                                    let slider = ui.add(slider!(
+                                        &mut volume,
+                                        vertical = false
+                                    ));
+                                    ui.end_row();
+
+                                    let stopped = drag.drag_stopped()
+                                        || slider.drag_stopped()
+                                        || drag.lost_focus();
+                                    let interacting = drag.dragged()
+                                        || slider.dragged();
+                                    *SYSTEM_VOLUME_EDITING
+                                        .lock()
+                                        .unwrap() = interacting;
+
+                                    if (drag.changed() || slider.changed())
+                                        && (drag.dragged()
+                                            || drag.drag_stopped()
+                                            || drag.lost_focus()
+                                            || slider.dragged()
+                                            || slider.drag_stopped())
+                                    {
+                                        *SYSTEM_VOLUME_UI
+                                            .lock()
+                                            .unwrap() = volume;
+                                        let should_write = {
+                                            let mut last =
+                                                LAST_SYSTEM_VOLUME_WRITE
+                                                    .lock()
+                                                    .unwrap();
+                                            if stopped
+                                                || last.elapsed()
+                                                    >= SYSTEM_VOLUME_WRITE_INTERVAL
+                                            {
+                                                *last = Instant::now();
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if should_write
+                                            && let Err(error) =
+                                                system::set_sink_volume(
+                                                    &active,
+                                                    volume,
+                                                )
+                                        {
+                                            warn!(
+                                                "Couldn't set the system volume: {}",
+                                                error
+                                            );
+                                        }
+                                    }
+                                    if stopped {
+                                        *SYSTEM_VOLUME_EDITING
+                                            .lock()
+                                            .unwrap() = false;
+                                    }
+                                });
+
+                            let hardware = blaster
+                                .feature(FeatureId::SpeakerVolume)
+                                .value();
+                            let hardware_db = FeatureId::SpeakerVolume
+                                .alsa_element()
+                                .filter(|_| !hardware.is_nan())
+                                .and_then(|(element, direction)| {
+                                    linuxblaster_control::mixer::volume_db(
+                                        element,
+                                        direction,
+                                        hardware,
+                                    )
+                                    .ok()
+                                });
+                            let hardware_text = if hardware.is_nan() {
+                                "unknown".to_owned()
+                            } else if let Some(db) = hardware_db {
+                                format!(
+                                    "{:.0}% ({:+.2} dB)",
+                                    hardware * 100.0,
+                                    db
+                                )
+                            } else {
+                                format!("{:.0}%", hardware * 100.0)
+                            };
+                            ui.label(format!(
+                                "G6 hardware Speaker: {}",
+                                hardware_text
+                            ));
+                        }
+                        None => {
+                            ui.colored_label(
+                                Color32::from_rgb(230, 190, 80),
+                                "The system default sink is not the G6 Pro \
+                                 or the virtual sink. Choose one above to \
+                                 use volume sync.",
+                            );
+                        }
+                    }
+                } else {
+                    ui.label(
+                        RichText::new(
+                            "Enable sync to control the active system sink \
+                             from here. The Mixer pane still exposes the G6 \
+                             hardware controls.",
+                        )
+                        .color(Color32::GRAY),
+                    );
+                }
+
+                ui.add_space(10.0);
+                section_header(ui, "SINAD bug fix");
+                if ui
+                    .checkbox(
+                        &mut settings.sinad_fix,
+                        "Limit the G6 hardware volume to -2.00 dB (97%)",
+                    )
+                    .changed()
+                {
+                    save_system_settings(&settings);
+                    *SYSTEM_SETTINGS.lock().unwrap() = settings;
+                    blaster.set_volume_cap(if settings.sinad_fix {
+                        Some(SINAD_VOLUME_CAP)
+                    } else {
+                        None
+                    });
+                    if settings.sync_volume {
+                        apply_single_gain_stage(blaster);
+                        enforce_sync_policy(blaster);
+                        refresh_system_now();
+                        status =
+                            SYSTEM_STATUS.lock().unwrap().clone();
+                    } else if settings.sinad_fix {
+                        let _ = blaster.enforce_volume_cap();
+                    }
+                }
+                ui.label(
+                    RichText::new(
+                        "Raw 124/128 on the G6's Speaker control is exactly \
+                         -2.00 dB. The cap is enforced after the knob or \
+                         another client changes it, and the Mixer slider \
+                         stops at 97% while this is on.",
+                    )
+                    .color(Color32::GRAY),
+                );
+
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "The virtual sink uses the separate GPL-3.0 g6ct \
+                         LADSPA plugin from the g6-re project. The app stays \
+                         MIT; the installer builds or copies the plugin \
+                         locally and never downloads native code.",
+                    )
+                    .color(Color32::GRAY),
+                );
+            });
+        });
 }
 
 /// Direct Mode's cached state. Unknown (NaN) counts as off; the monitor
@@ -861,24 +1580,50 @@ fn toggle_slider_row(
     // NaN = couldn't be read (e.g. ALSA card not found)
     let toggle_available = !toggle_feature.value().is_nan();
     let slider_available = !slider_feature.value().is_nan();
+    let is_speaker = slider_id == FeatureId::SpeakerVolume;
+    // The SINAD fix makes 97% the highest selectable hardware volume.
+    let slider_max = if is_speaker && sinad_fix_enabled() {
+        SINAD_VOLUME_CAP * 100.0
+    } else {
+        100.0
+    };
     let mut slider_value = if slider_available {
-        slider_feature.value() * 100.0
+        (slider_feature.value() * 100.0).clamp(0.0, slider_max)
     } else {
         0.0
     };
+    // In sync mode the active sink owns the volume; the hardware slider
+    // is informational and must not introduce a second attenuation stage.
+    let volume_available =
+        slider_available && !(is_speaker && sync_volume_enabled());
 
     let toggle = ui
         .add_enabled_ui(toggle_available, |ui| {
             toggle_button!(ui, toggle_feature.as_bool(), label, width = full)
         })
         .inner;
-    let drag_value =
-        ui.add_enabled(slider_available, drag_value!(&mut slider_value));
+    let drag_value = ui.add_enabled(
+        volume_available,
+        drag_value!(
+            &mut slider_value,
+            range = 0.0..=slider_max
+        ),
+    );
     fit_slider_to_column(ui);
     let slider = ui.add_enabled(
-        slider_available,
-        slider!(&mut slider_value, vertical = false),
+        volume_available,
+        slider!(
+            &mut slider_value,
+            vertical = false,
+            range = 0.0..=slider_max
+        ),
     );
+    if is_speaker && sync_volume_enabled() {
+        slider.clone().on_hover_text(
+            "Volume sync is on. Use System -> System volume; \
+             the hardware stage is held at the safe level.",
+        );
+    }
 
     if toggle.clicked() {
         let _ = blaster.set_feature(toggle_id, None);
@@ -1194,6 +1939,24 @@ fn mixer_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
         )
         .color(Color32::GRAY),
     );
+    if sync_volume_enabled() {
+        ui.label(
+            RichText::new(
+                "Volume sync is on: the Speaker volume slider is locked \
+                 while the System pane's system-sink slider owns the \
+                 volume. The Speaker mute still works.",
+            )
+            .color(Color32::from_rgb(230, 190, 80)),
+        );
+    } else if sinad_fix_enabled() {
+        ui.label(
+            RichText::new(
+                "SINAD fix is on: the Speaker volume slider stops at 97% \
+                 (-2.00 dB).",
+            )
+            .color(Color32::GRAY),
+        );
+    }
 }
 
 fn lighting_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
@@ -1312,6 +2075,19 @@ impl Launcher {
                         warn!("Couldn't restore the last state: {}", error);
                     }
                 }
+
+                // Apply the persisted SINAD cap before the first frame.
+                // The first frame handles the optional sync gain staging.
+                let settings = *SYSTEM_SETTINGS.lock().unwrap();
+                device.set_volume_cap(if settings.sinad_fix {
+                    Some(SINAD_VOLUME_CAP)
+                } else {
+                    None
+                });
+                if settings.sinad_fix {
+                    let _ = device.enforce_volume_cap();
+                }
+                *STARTUP_POLICY_APPLIED.lock().unwrap() = false;
 
                 // on the first connection, which may be a few retries later
                 // (e.g. while the G6 is still coming back from a USB reset)

@@ -138,6 +138,10 @@ The app also saves its last settings and re-applies them on the next launch; see
 	- Recording Source
 - **Lighting**
 	- On/Off & Color
+- **System**
+	- Virtual 7.1 headphones sink (1:1 port of the G6 downmixer APO, f64)
+	- PipeWire volume sync with the active output
+	- SINAD fix: hardware volume capped at −2.00 dB
 - **Scout Mode** 
 
 ## Not-Implemented Features
@@ -203,6 +207,16 @@ The app writes its current settings to `~/.local/share/linuxblaster/last_state.j
 A corrupt or incompatible snapshot is renamed to `last_state.json.bad` and ignored, so it cannot block every launch. This is separate from the profiles in `~/.local/share/linuxblaster/profiles/`.
 
 No separate daemon is needed: the app is the controller and restores its own state when it starts. It autostarts with the desktop session on KDE; if your desktop does not restore running applications, add the app's `.desktop` file to `~/.config/autostart/`.
+
+## Virtual 7.1 Sink and Volume Sync
+
+The System pane can install a virtual 7.1 sink for headphones. It is a PipeWire filter-chain that feeds the G6 Pro output. 7.1 PCM arrives at the sink and is downmixed by a **1:1 code port of the Sound BlasterX G6 downmixer APO** (`CMatrixEncoderEfxMod` from `KSUSBAPO64.dll`, fully decoded and verified bit-exact in g6-re). The port runs in **f64 instead of the original f32** — the only difference.
+
+The installer looks for the plugin sources in `~/g6-re/port`, builds `libg6ct_ladspa_f64.so`, copies it to `~/.local/lib/linuxblaster/`, writes a PipeWire config for the G6 sink that is actually attached, and restarts `pipewire.service`. The plugin is GPL-3.0 and stays a separate program; this app is MIT and does not redistribute or download native code at runtime. Installing it briefly interrupts audio.
+
+The toggle routes the default output between the G6 Pro sink (direct) and the virtual sink. When **sync volume** is enabled, the active sink's PipeWire volume is the single volume control and the inactive gain stage stays at 100%; the volume is carried over when the output switches.
+
+The **SINAD fix** limits the hardware Speaker control to raw `124/128` — 97% on the slider, which is −2.00 dB. The cap is enforced on every write, and if another client or the knob pushes the hardware volume above it, the app restores the cap automatically.
 
 ## For Developers
 
