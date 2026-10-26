@@ -40,6 +40,135 @@ pub fn embedded_plugin() -> &'static [u8] {
     EMBEDDED_PLUGIN
 }
 
+/// Files installed by the optional cold-boot helper. `packaging/coldboot/`
+/// ships the same set for a terminal install (`install.sh`).
+pub const COLD_BOOT_SCRIPT: &str = "/usr/local/libexec/g6-coldboot-prep.sh";
+pub const COLD_BOOT_UNIT: &str =
+    "/etc/systemd/system/g6-coldboot-prep.service";
+pub const COLD_BOOT_RULE: &str = "/etc/udev/rules.d/71-g6-coldboot.rules";
+pub const COLD_BOOT_CONF: &str = "/etc/modprobe.d/99-g6-coldboot.conf";
+
+/// `(file name, contents, destination)`, embedded so the button works
+/// without a source checkout or a package that ships the helper separately.
+const COLD_BOOT_FILES: [(&str, &str, &str); 4] = [
+    (
+        "g6-coldboot-prep.sh",
+        include_str!("../packaging/coldboot/g6-coldboot-prep.sh"),
+        COLD_BOOT_SCRIPT,
+    ),
+    (
+        "g6-coldboot-prep.service",
+        include_str!("../packaging/coldboot/g6-coldboot-prep.service"),
+        COLD_BOOT_UNIT,
+    ),
+    (
+        "71-g6-coldboot.rules",
+        include_str!("../packaging/coldboot/71-g6-coldboot.rules"),
+        COLD_BOOT_RULE,
+    ),
+    (
+        "99-g6-coldboot.conf",
+        include_str!("../packaging/coldboot/99-g6-coldboot.conf"),
+        COLD_BOOT_CONF,
+    ),
+];
+
+/// What the system pane reports about the optional cold-boot helper.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ColdBoot {
+    pub installed: bool,
+    /// The reset and the HID ping shell out to python3.
+    pub python: bool,
+}
+
+impl ColdBoot {
+    fn detect() -> Self {
+        Self {
+            installed: COLD_BOOT_FILES
+                .iter()
+                .all(|(_, _, destination)| Path::new(destination).exists()),
+            python: Path::new("/usr/bin/python3").exists(),
+        }
+    }
+}
+
+/// Installs the cold-boot helper with a graphical password prompt.
+///
+/// The four files are written to a private temporary directory and then
+/// copied into place by one `pkexec` call, so there is a single prompt and
+/// no half-installed state on cancel.
+pub fn install_cold_boot_helper() -> Result<String, String> {
+    let directory = std::env::temp_dir().join(format!(
+        "linuxblaster-coldboot-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&directory).map_err(|error| {
+        format!("Couldn't create {}: {}", directory.display(), error)
+    })?;
+    // Only this user may write here; root can still read it for the install.
+    // Without this, another local user could swap a file between the write
+    // and the pkexec copy.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .map_err(|error| {
+                format!(
+                    "Couldn't restrict {}: {}",
+                    directory.display(),
+                    error
+                )
+            })?;
+    }
+
+    for (name, contents, _) in COLD_BOOT_FILES {
+        let path = directory.join(name);
+        fs::write(&path, contents).map_err(|error| {
+            format!("Couldn't write {}: {}", path.display(), error)
+        })?;
+    }
+
+    // One shell, one prompt: install all four files, then reload udev and
+    // systemd. "set -e" stops before the reloads if a copy fails.
+    let script = r#"
+set -e
+install -Dm755 "$1/g6-coldboot-prep.sh" "/usr/local/libexec/g6-coldboot-prep.sh"
+install -Dm644 "$1/g6-coldboot-prep.service" "/etc/systemd/system/g6-coldboot-prep.service"
+install -Dm644 "$1/71-g6-coldboot.rules" "/etc/udev/rules.d/71-g6-coldboot.rules"
+install -Dm644 "$1/99-g6-coldboot.conf" "/etc/modprobe.d/99-g6-coldboot.conf"
+udevadm control --reload-rules
+systemctl daemon-reload
+"#;
+
+    let status = std::process::Command::new("pkexec")
+        .args(["sh", "-c", script, "sh"])
+        .arg(&directory)
+        .status();
+    let _ = fs::remove_dir_all(&directory);
+
+    match status {
+        Ok(status) if status.success() => Ok(
+            "Cold-boot helper installed. It runs on the next cold boot, when \
+             the G6 appears on USB."
+                .to_owned(),
+        ),
+        // pkexec: 126 = dialog dismissed, 127 = not authorized
+        Ok(status) if status.code() == Some(126) => {
+            Err("The password prompt was cancelled.".to_owned())
+        }
+        Ok(status) if status.code() == Some(127) => {
+            Err("The password prompt was not authorized.".to_owned())
+        }
+        Ok(status) => Err(format!("Installing the helper failed ({}).", status)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Err(
+            "pkexec isn't installed, so the password prompt can't be shown. \
+             Run packaging/coldboot/install.sh as root instead."
+                .to_owned(),
+        ),
+        Err(error) => Err(format!("Couldn't start pkexec: {}", error)),
+    }
+}
+
 /// User settings owned by the System pane. Kept separately from the G6
 /// device snapshot so the device JSON stays compatible.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +268,7 @@ pub struct Status {
     pub virtual_volume: Option<f32>,
     pub g6_volume: Option<f32>,
     pub active_volume: Option<f32>,
+    pub cold_boot: ColdBoot,
     pub error: Option<String>,
 }
 
@@ -159,6 +289,7 @@ impl Status {
     pub fn refresh() -> Self {
         let plugin = find_plugin();
         let config_present = config_path().is_file();
+        let cold_boot = ColdBoot::detect();
 
         let sinks = match list_sinks() {
             Ok(sinks) => sinks,
@@ -166,6 +297,7 @@ impl Status {
                 return Self {
                     config_present,
                     plugin,
+                    cold_boot,
                     error: Some(error),
                     ..Self::default()
                 };
@@ -215,6 +347,7 @@ impl Status {
             virtual_volume,
             g6_volume,
             active_volume,
+            cold_boot,
             error,
         }
     }
@@ -818,6 +951,44 @@ mod tests {
             inputs.iter().any(SinkInput::is_filter_chain_output),
             "no filter-chain output in {inputs:#?}"
         );
+    }
+
+    #[test]
+    fn embedded_cold_boot_helper_is_internally_consistent() {
+        for (name, contents, destination) in COLD_BOOT_FILES {
+            assert!(!contents.is_empty(), "{name} is empty");
+            assert!(destination.starts_with('/'), "{name}: {destination}");
+        }
+
+        let script = COLD_BOOT_FILES
+            .iter()
+            .find(|(name, _, _)| *name == "g6-coldboot-prep.sh")
+            .map(|(_, contents, _)| *contents)
+            .expect("script");
+        let unit = COLD_BOOT_FILES
+            .iter()
+            .find(|(name, _, _)| *name == "g6-coldboot-prep.service")
+            .map(|(_, contents, _)| *contents)
+            .expect("unit");
+        let rule = COLD_BOOT_FILES
+            .iter()
+            .find(|(name, _, _)| *name == "71-g6-coldboot.rules")
+            .map(|(_, contents, _)| *contents)
+            .expect("rule");
+        let conf = COLD_BOOT_FILES
+            .iter()
+            .find(|(name, _, _)| *name == "99-g6-coldboot.conf")
+            .map(|(_, contents, _)| *contents)
+            .expect("conf");
+
+        // The unit has to point at the path the installer copies the script to.
+        assert!(unit.contains(&format!("ExecStart={COLD_BOOT_SCRIPT}")));
+        // The rule has to start the unit.
+        assert!(rule.contains("g6-coldboot-prep.service"));
+        assert!(rule.contains("ATTR{idVendor}==\"041e\""));
+        // The script must undo what the drop-in holds back.
+        assert!(conf.contains("blacklist snd-usb-audio"));
+        assert!(script.contains("modprobe snd-usb-audio"));
     }
 
     #[test]
