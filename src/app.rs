@@ -75,6 +75,23 @@ static INSTALL_JOB: LazyLock<Mutex<Option<InstallJob>>> =
     LazyLock::new(|| Mutex::new(None));
 static INSTALL_MESSAGE: LazyLock<Mutex<Option<Result<String, String>>>> =
     LazyLock::new(|| Mutex::new(None));
+/// The optional cold-boot helper installs as root; it gets its own job so a
+/// password prompt cannot block a frame.
+type ColdBootJob = JoinHandle<Result<String, String>>;
+static COLD_BOOT_JOB: LazyLock<Mutex<Option<ColdBootJob>>> =
+    LazyLock::new(|| Mutex::new(None));
+static COLD_BOOT_MESSAGE: LazyLock<Mutex<Option<Result<String, String>>>> =
+    LazyLock::new(|| Mutex::new(None));
+/// Actions that change audio or boot behaviour ask first: one restarts
+/// PipeWire, the other installs root files and a module blacklist. Neither
+/// runs on a stray click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemAction {
+    InstallSink,
+    InstallColdBoot,
+}
+static CONFIRM_ACTION: LazyLock<Mutex<Option<SystemAction>>> =
+    LazyLock::new(|| Mutex::new(None));
 /// The installer restarts PipeWire; the G6 sink disappears for a moment
 /// and `Status::refresh` would report it as missing. Hide errors for a
 /// short settle window after the job ends.
@@ -482,6 +499,89 @@ fn poll_install_job(ctx: &egui::Context) {
     }
 }
 
+fn poll_cold_boot_job(ctx: &egui::Context) {
+    let running = {
+        let job = COLD_BOOT_JOB.lock().unwrap();
+        match job.as_ref() {
+            Some(handle) => !handle.is_finished(),
+            None => return,
+        }
+    };
+    if running {
+        ctx.request_repaint_after(Duration::from_millis(100));
+        return;
+    }
+
+    if let Some(handle) = COLD_BOOT_JOB.lock().unwrap().take() {
+        let result = handle.join().unwrap_or_else(|_| {
+            Err("The installer thread panicked.".to_owned())
+        });
+        *COLD_BOOT_MESSAGE.lock().unwrap() = Some(result);
+        *LAST_SYSTEM_REFRESH.lock().unwrap() = None;
+        ctx.request_repaint();
+    }
+}
+
+/// Draws the confirmation modal and reports the action the user approved.
+///
+/// Returns `Some` exactly once: the pending action is cleared as soon as the
+/// dialog is answered, whether that was "Cancel", Escape or the confirm
+/// button.
+fn confirm_system_action(ctx: &egui::Context) -> Option<SystemAction> {
+    let action = (*CONFIRM_ACTION.lock().unwrap())?;
+    let mut confirmed = false;
+    let mut cancelled = false;
+
+    let (title, body, confirm) = match action {
+        SystemAction::InstallSink => (
+            "Restart PipeWire?",
+            "Installing the virtual 7.1 sink writes a PipeWire drop-in and \
+             restarts the user PipeWire service.\n\n\
+             Every audio stream stops for a few seconds. The current default \
+             output and volume are restored afterwards.",
+            "Restart and install",
+        ),
+        SystemAction::InstallColdBoot => (
+            "Install the cold-boot helper?",
+            "This adds four files as root: a root script, a systemd oneshot, \
+             a udev rule and a modprobe drop-in.\n\n\
+             Side effects: snd-usb-audio is held back from auto-loading until \
+             the helper loads it after preparing the G6. Another USB audio \
+             device attached at the same boot needs \"sudo modprobe \
+             snd-usb-audio\" once. The G6 is reset once per cold boot, before \
+             PipeWire opens it.",
+            "Install",
+        ),
+    };
+
+    let response = egui::Modal::new(egui::Id::new("system_confirm"))
+        .show(ctx, |ui| {
+            ui.set_max_width(430.0);
+            ui.heading(title);
+            ui.add_space(6.0);
+            ui.label(body);
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    cancelled = true;
+                }
+                if ui.button(confirm).clicked() {
+                    confirmed = true;
+                }
+            });
+        });
+
+    if cancelled || response.should_close() {
+        *CONFIRM_ACTION.lock().unwrap() = None;
+        return None;
+    }
+    if confirmed {
+        *CONFIRM_ACTION.lock().unwrap() = None;
+        return Some(action);
+    }
+    None
+}
+
 /// Applies the persisted volume policy once per connection. The cap is
 /// applied immediately; sync mode then converts the current hardware
 /// volume into the active sink volume without a loudness jump.
@@ -604,10 +704,33 @@ fn enforce_sync_policy(blaster: &BlasterXG6) {
 }
 
 fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
+    poll_cold_boot_job(ui.ctx());
+
+    // Both actions below restart audio or install root files; neither runs
+    // without the user approving this dialog.
+    match confirm_system_action(ui.ctx()) {
+        Some(SystemAction::InstallSink) => {
+            *INSTALL_MESSAGE.lock().unwrap() = None;
+            let handle = std::thread::spawn(system::install_virtual_sink);
+            *INSTALL_JOB.lock().unwrap() = Some(handle);
+            *LAST_SYSTEM_REFRESH.lock().unwrap() = None;
+        }
+        Some(SystemAction::InstallColdBoot) => {
+            *COLD_BOOT_MESSAGE.lock().unwrap() = None;
+            let handle =
+                std::thread::spawn(system::install_cold_boot_helper);
+            *COLD_BOOT_JOB.lock().unwrap() = Some(handle);
+            *LAST_SYSTEM_REFRESH.lock().unwrap() = None;
+        }
+        None => {}
+    }
+
     let mut status = SYSTEM_STATUS.lock().unwrap().clone();
     let mut settings = *SYSTEM_SETTINGS.lock().unwrap();
     let install_busy = INSTALL_JOB.lock().unwrap().is_some();
     let install_message = INSTALL_MESSAGE.lock().unwrap().clone();
+    let cold_boot_busy = COLD_BOOT_JOB.lock().unwrap().is_some();
+    let cold_boot_message = COLD_BOOT_MESSAGE.lock().unwrap().clone();
     let settling = STATUS_ERROR_SETTLE_UNTIL
         .lock()
         .unwrap()
@@ -623,11 +746,10 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                 section_header(ui, "Virtual 7.1 sink (headphones)");
                 ui.label(
                     RichText::new(
-                        "The virtual sink is a PipeWire filter-chain, not the \
-                         G6's DSP: 7.1 PCM arrives at the sink and is \
-                         downmixed by a 1:1 code port of the Sound BlasterX \
-                         G6 downmixer APO (CMatrixEncoderEfxMod from \
-                         KSUSBAPO64.dll). The port runs in f64 instead of the \
+                        "A PipeWire filter-chain sink that turns 7.1 PCM into \
+                         the G6's binaural stereo. The downmix is a 1:1 port \
+                         of the G6 downmixer APO (CMatrixEncoderEfxMod from \
+                         KSUSBAPO64.dll) and runs in f64 instead of the \
                          original f32 — the only difference.",
                     )
                     .color(Color32::GRAY),
@@ -740,13 +862,17 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                         Button::new(label),
                     );
                     if button.clicked() {
-                        *INSTALL_MESSAGE.lock().unwrap() = None;
-                        let handle = std::thread::spawn(
-                            system::install_virtual_sink,
-                        );
-                        *INSTALL_JOB.lock().unwrap() = Some(handle);
-                        *LAST_SYSTEM_REFRESH.lock().unwrap() = None;
+                        *CONFIRM_ACTION.lock().unwrap() =
+                            Some(SystemAction::InstallSink);
                     }
+                    ui.label(
+                        RichText::new(
+                            "Installing restarts PipeWire so the sink is \
+                             loaded: all audio stops for a few seconds, then \
+                             the previous default output and volume come back.",
+                        )
+                        .color(Color32::GRAY),
+                    );
                     if !can_install {
                         ui.label(
                             RichText::new(
@@ -873,10 +999,11 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                 }
                 ui.label(
                     RichText::new(
-                        "The active PipeWire sink is the single volume \
-                         control. The G6 hardware Speaker stays at the \
-                         SINAD cap (or 0 dB if the fix is off), so there is \
-                         only one variable gain stage before the DAC.",
+                        "One gain stage, one control. With sync on, the volume \
+                         of the active sink is the only user-facing volume and \
+                         the G6 hardware Speaker is pinned at the SINAD cap \
+                         (or 0 dB when the fix is off). With sync off, the \
+                         Mixer pane drives the hardware directly, as before.",
                     )
                     .color(Color32::GRAY),
                 );
@@ -1010,20 +1137,21 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                 } else {
                     ui.label(
                         RichText::new(
-                            "Enable sync to control the active system sink \
-                             from here. The Mixer pane still exposes the G6 \
-                             hardware controls.",
+                            "Sync is off: the Mixer pane controls the G6 \
+                             hardware directly and the system volume is left \
+                             alone. Turn sync on to control the active sink \
+                             from here instead.",
                         )
                         .color(Color32::GRAY),
                     );
                 }
 
                 ui.add_space(10.0);
-                section_header(ui, "SINAD bug fix");
+                section_header(ui, "SINAD bug fix (off by default)");
                 if ui
                     .checkbox(
                         &mut settings.sinad_fix,
-                        "Limit the G6 hardware volume to -2.00 dB (97%)",
+                        "Cap the G6 hardware Speaker at -2.00 dB (97%)",
                     )
                     .changed()
                 {
@@ -1047,20 +1175,117 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                 ui.label(
                     RichText::new(
                         "Raw 124/128 on the G6's Speaker control is exactly \
-                         -2.00 dB. The cap is enforced after the knob or \
-                         another client changes it, and the Mixer slider \
-                         stops at 97% while this is on.",
+                         -2.00 dB. Above it the output distorts, and the knob \
+                         or another client can push it there. With the fix on, \
+                         the cap is re-applied after such a change and the \
+                         Mixer slider stops at 97%. It is off by default \
+                         because it also caps volume set by other clients; \
+                         turn it on only if you hear the distortion.",
                     )
                     .color(Color32::GRAY),
                 );
 
-                ui.add_space(8.0);
+                ui.add_space(12.0);
+                section_header(ui, "Cold boot (optional)");
+                ui.label(
+                    RichText::new(
+                        "Some machines come out of a cold boot with the G6's \
+                         control endpoint dead and a broken first audio \
+                         enumeration. The app cannot reset the device while it \
+                         runs — that breaks audio for the whole session — so \
+                         the reset has to happen once, at boot, before \
+                         PipeWire opens it. This installs that helper.",
+                    )
+                    .color(Color32::GRAY),
+                );
+                ui.add_space(6.0);
+
+                Grid::new("system_coldboot_status")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Helper");
+                        if status.cold_boot.installed {
+                            ui.colored_label(
+                                Color32::from_rgb(80, 200, 120),
+                                "installed",
+                            );
+                        } else {
+                            ui.colored_label(
+                                Color32::from_rgb(230, 190, 80),
+                                "not installed",
+                            );
+                        }
+                        ui.end_row();
+
+                        ui.label("python3");
+                        if status.cold_boot.python {
+                            ui.label("available");
+                        } else {
+                            ui.colored_label(
+                                Color32::from_rgb(230, 190, 80),
+                                "missing — the reset is skipped without it",
+                            );
+                        }
+                        ui.end_row();
+                    });
+
+                ui.add_space(6.0);
+                if cold_boot_busy {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("Waiting for the password prompt...")
+                                .color(Color32::GRAY),
+                        );
+                    });
+                } else {
+                    let label = if status.cold_boot.installed {
+                        "Reinstall cold-boot helper"
+                    } else {
+                        "Install cold-boot helper"
+                    };
+                    if ui.button(label).clicked() {
+                        *CONFIRM_ACTION.lock().unwrap() =
+                            Some(SystemAction::InstallColdBoot);
+                    }
+                    ui.label(
+                        RichText::new(
+                            "Asks before doing anything: it needs root, and it \
+                             holds snd-usb-audio back until the helper loads \
+                             it, so another USB audio device attached at that \
+                             boot needs \"sudo modprobe snd-usb-audio\" once. \
+                             Only the G6 is reset.",
+                        )
+                        .color(Color32::GRAY),
+                    );
+                }
+
+                if let Some(result) = &cold_boot_message {
+                    match result {
+                        Ok(message) => {
+                            ui.colored_label(
+                                Color32::from_rgb(80, 200, 120),
+                                message,
+                            );
+                        }
+                        Err(message) => {
+                            ui.colored_label(
+                                Color32::from_rgb(230, 100, 100),
+                                message,
+                            );
+                        }
+                    }
+                }
+
+                ui.add_space(10.0);
                 ui.label(
                     RichText::new(
                         "The virtual sink uses the g6ct LADSPA plugin, \
-                         vendored under vendor/g6ct and licensed MIT like \
-                         the app. It is compiled into this binary, so the \
-                         installer needs no source tree and no download.",
+                         vendored from g6-re under vendor/g6ct and licensed \
+                         MIT like the app. It is compiled into this binary by \
+                         build.rs, so installing needs no source tree and no \
+                         download.",
                     )
                     .color(Color32::GRAY),
                 );
