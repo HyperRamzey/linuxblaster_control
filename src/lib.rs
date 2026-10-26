@@ -12,6 +12,8 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
+mod ladspa_tests;
+#[cfg(test)]
 mod tests;
 
 pub mod features;
