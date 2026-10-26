@@ -263,7 +263,13 @@ fn main() {
 ///
 /// The flags mirror `g6-re/port/Makefile`: `-ffp-contract=off` and
 /// `-fno-fast-math` are part of the numerical contract, not tuning knobs.
-/// Without them the port stops matching the APO bit-for-bit.
+/// Without them the port stops matching the APO bit-for-bit. `CFLAGS` is
+/// deliberately ignored so a packaging environment cannot relax them.
+///
+/// Needs a C compiler at build time: `cc` (or `CC` for a native build,
+/// `CC_<target>` when cross-compiling). The plugin is compiled for the
+/// target and embedded in the binary, so a host compiler for a cross build
+/// would silently embed the wrong architecture.
 fn build_g6ct_plugin() {
     let manifest = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).to_path_buf();
     let source = manifest.join("vendor/g6ct");
@@ -273,9 +279,12 @@ fn build_g6ct_plugin() {
     println!("cargo:rerun-if-changed=vendor/g6ct/g6ct.c");
     println!("cargo:rerun-if-changed=vendor/g6ct/g6ct.h");
     println!("cargo:rerun-if-changed=vendor/g6ct/g6ct_ladspa.c");
+    println!("cargo:rerun-if-env-changed=CC");
 
-    let compiler = env::var("CC").unwrap_or_else(|_| "cc".to_owned());
-    let status = std::process::Command::new(&compiler)
+    let compiler = plugin_compiler();
+    println!("cargo:rerun-if-env-changed={}", compiler.env_var);
+
+    let status = std::process::Command::new(&compiler.program)
         .args([
             "-std=c11",
             "-O2",
@@ -294,11 +303,48 @@ fn build_g6ct_plugin() {
         .arg("-lm")
         .status()
         .unwrap_or_else(|error| {
-            panic!("couldn't run {compiler} to build the g6ct plugin: {error}")
+            panic!(
+                "couldn't run {} to build the g6ct plugin: {error}. \
+                 A C compiler is required (set {} for a cross build).",
+                compiler.program, compiler.env_var
+            )
         });
 
     assert!(
         status.success(),
-        "building libg6ct_ladspa_f64.so with {compiler} failed"
+        "building libg6ct_ladspa_f64.so with {} failed",
+        compiler.program
     );
+}
+
+struct PluginCompiler {
+    program: String,
+    env_var: String,
+}
+
+/// Cargo convention: `CC_<target>` for cross builds, `CC` otherwise.
+fn plugin_compiler() -> PluginCompiler {
+    let target = env::var("TARGET").unwrap_or_default();
+    let host = env::var("HOST").unwrap_or_default();
+    let target_var = format!("CC_{}", target.replace('-', "_"));
+
+    if !target.is_empty() && target != host {
+        if let Ok(program) = env::var(&target_var) {
+            return PluginCompiler {
+                program,
+                env_var: target_var,
+            };
+        }
+        panic!(
+            "cross-compiling to {target} from {host}, but {target_var} is not set. \
+             The g6ct plugin is compiled for the target and embedded in the binary, \
+             so a native compiler would embed the wrong architecture. Set {target_var} \
+             to a {target} C compiler."
+        );
+    }
+
+    PluginCompiler {
+        program: env::var("CC").unwrap_or_else(|_| "cc".to_owned()),
+        env_var: "CC".to_owned(),
+    }
 }
