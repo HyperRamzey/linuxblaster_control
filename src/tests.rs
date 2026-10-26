@@ -1,4 +1,7 @@
 #[cfg(test)]
+// The file is already `tests.rs`; keeping the inner module named `tests`
+// matches how the rest of the crate refers to it.
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::features::{self, FeatureId, MIC_EQ_PRESETS, ValueKind};
 
