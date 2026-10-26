@@ -180,7 +180,7 @@ cargo build --release
 
 Without the packages, you'll also need the udev rule for access to the device: copy [`packaging/70-linuxblaster-control.rules`](packaging/70-linuxblaster-control.rules) to `/etc/udev/rules.d/` (or use the *Allow access* button in the app).
 
-The device is accessed through the kernel's hidraw interface, so starting the app doesn't reset the USB device (which would interrupt audio for a moment). A reset is only done as a fallback if the device doesn't respond.
+The device is accessed through the kernel's hidraw interface. The app never resets the USB device: a reset wakes the HID endpoint but leaves the audio interface unusable until the next re-enumeration, which breaks playback for the rest of the session. Instead it waits and retries the endpoint, reopening the hidraw node when the device re-enumerated.
 
 To print the current device state without the GUI (read-only):
 
@@ -194,6 +194,16 @@ cargo run --example dump_state
 nix develop   # development shell with all dependencies
 nix build     # build the package
 ```
+
+### Cold boot
+
+On some machines the G6 comes out of a cold boot with a dead HID endpoint and a broken first audio enumeration (`selector reported illegal value`). The app cannot repair that while it runs: resetting the device would break audio for the whole session. The optional helper does the reset once, at boot, before PipeWire opens the device:
+
+```bash
+sudo packaging/coldboot/install.sh
+```
+
+It runs from the G6's udev `add` event, is not part of the boot transaction, and does not delay the display manager. It holds `snd-usb-audio` back from the first enumeration and loads it after a clean re-enumeration. **Side effect:** the blacklist is per module, so another USB audio device attached at boot needs `sudo modprobe snd-usb-audio` once. Details, verification steps and removal: [`packaging/coldboot/README.md`](packaging/coldboot/README.md).
 
 ### Release Packages
 
