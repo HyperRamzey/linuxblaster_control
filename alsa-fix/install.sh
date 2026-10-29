@@ -35,7 +35,7 @@ check_deps() {
 
 # --- Install ---
 
-install() {
+run_install() {
     check_deps
 
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -100,6 +100,6 @@ case "${1:-}" in
         echo "mixer defaults for the SoundBlasterX G6 whenever it's plugged in."
         ;;
     *)
-        install
+        run_install
         ;;
 esac
