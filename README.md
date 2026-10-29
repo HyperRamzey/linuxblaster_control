@@ -156,6 +156,18 @@ Profiles are stored as JSON files in `~/.local/share/linuxblaster/profiles/`.
 A profile applies to the output that is currently active (Speakers or Headphones).
 Profiles from before v2.1 will have to be remade, the old format is no longer compatible.
 
+### Applying a profile on startup
+
+The G6 forgets its settings when it's reset or unplugged (lighting comes back on, effects are off, ...).
+To get them back automatically, start the app with one of these options, e.g. in its autostart entry (`Exec=linuxblaster_control --apply-last`):
+
+- `--apply-last` applies the profile you loaded or saved last in the app.
+  The app remembers it from the first time you load or save a profile with this version.
+- `--apply-profile <file>` applies the given profile file.
+
+The profile is applied as soon as the G6 is connected, also if it only shows up a few seconds after the app started.
+Only the settings that differ from what the device reports are written.
+
 > [!IMPORTANT]
 > The profile format is custom to this application and is **not compatible** with official Creative Sound Blaster Command profiles (.json or .xml) from Windows.
 

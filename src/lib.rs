@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::error::Error;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use tracing::{debug, error, info, warn};
 
@@ -44,6 +44,33 @@ pub static DEFAULT_BASE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
 });
 
 pub static DEVICE_CONNECTION: OnceLock<Mutex<HidDevice>> = OnceLock::new();
+
+/// Holds the path of the profile that was loaded or saved last,
+/// so it can be applied on startup (`--apply-last`).
+pub static LAST_PROFILE_FILE: LazyLock<PathBuf> =
+    LazyLock::new(|| DEFAULT_BASE_PATH.join("last_profile"));
+
+/// The profile that was loaded or saved last, if any.
+pub fn last_profile() -> Option<PathBuf> {
+    let path = std::fs::read_to_string(&*LAST_PROFILE_FILE).ok()?;
+    let path = path.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Remembers `path` as the last used profile (see `last_profile()`).
+/// Only logs on failure: this is a convenience, not worth an error dialog.
+pub fn remember_last_profile(path: &Path) {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let result = std::fs::create_dir_all(&*DEFAULT_BASE_PATH).and_then(|_| {
+        std::fs::write(&*LAST_PROFILE_FILE, path.to_string_lossy().as_bytes())
+    });
+    if let Err(error) = result {
+        warn!(
+            "Failed to remember the last profile in {:?}: {}",
+            *LAST_PROFILE_FILE, error
+        );
+    }
+}
 
 /// The udev rule that grants the logged-in user access to the G6.
 /// Shipped in the packages, and installed by the app on request.
@@ -469,22 +496,30 @@ impl BlasterXG6 {
         Ok(())
     }
 
-    /// Applies a profile to the currently active output.
-    ///
-    /// Every saved value is written, including toggles that are OFF,
-    /// and sliders are written as-is without switching their toggle on.
-    pub fn apply_profile(&self, path: PathBuf) -> Result<(), Box<dyn Error>> {
-        let json = std::fs::read_to_string(&path)?;
+    /// Reads the values a profile applies: every feature stored in profiles,
+    /// except the ones that couldn't be read when it was saved.
+    fn read_profile(
+        path: &Path,
+    ) -> Result<Vec<(FeatureId, f32)>, Box<dyn Error>> {
+        let json = std::fs::read_to_string(path)?;
         let saved: BlasterXG6 = serde_json::from_str(&json)?;
 
-        let values = saved
+        Ok(saved
             .features
             .iter()
             .filter(|feature| feature.id.in_profile())
             // NaN = the value couldn't be read when the profile was saved
             .filter(|feature| !feature.value().is_nan())
             .map(|feature| (feature.id, feature.value()))
-            .collect();
+            .collect())
+    }
+
+    /// Applies a profile to the currently active output.
+    ///
+    /// Every saved value is written, including toggles that are OFF,
+    /// and sliders are written as-is without switching their toggle on.
+    pub fn apply_profile(&self, path: PathBuf) -> Result<(), Box<dyn Error>> {
+        let values = Self::read_profile(&path)?;
 
         self.write_in_order(values);
         self.read_state_from_device();
@@ -493,4 +528,70 @@ impl BlasterXG6 {
 
         Ok(())
     }
+
+    /// Applies a profile like `apply_profile()`, but only writes the values
+    /// that differ from the state read from the device.
+    /// Used on startup, where usually little or nothing has changed,
+    /// so the device isn't flooded with writes it doesn't need.
+    ///
+    /// Returns how many features were written.
+    pub fn sync_profile(&self, path: &Path) -> Result<usize, Box<dyn Error>> {
+        let saved = Self::read_profile(path)?;
+        let changes = profile_changes(&self.features, &saved);
+
+        if changes.is_empty() {
+            info!("Device already matches the profile ({:?})", path);
+            return Ok(0);
+        }
+
+        let count = changes.len();
+        debug!("Profile changes: {:?}", changes);
+        self.write_in_order(changes);
+        self.read_state_from_device();
+
+        let mismatched: Vec<FeatureId> = saved
+            .iter()
+            .filter(|&&(id, value)| self.feature(id).value() != value)
+            .map(|&(id, _)| id)
+            .collect();
+        if !mismatched.is_empty() {
+            warn!("Device doesn't match the profile for: {:?}", mismatched);
+        }
+
+        info!("Applied {} setting(s) from the profile ({:?})", count, path);
+
+        Ok(count)
+    }
+}
+
+/// The saved values that differ from the cached `current` state
+/// (a value that couldn't be read counts as different).
+///
+/// The saved toggles of the changed values' `dependencies()` are included too,
+/// even if they match: `set_feature()` switches them on before such a write,
+/// so writing them again (after the value, see `write_in_order()`)
+/// makes sure they end up as saved. Everything returned is a subset of what
+/// `apply_profile()` writes, so it keeps the same write order and side effects.
+pub(crate) fn profile_changes(
+    current: &[Feature],
+    saved: &[(FeatureId, f32)],
+) -> Vec<(FeatureId, f32)> {
+    let cached = |id: FeatureId| {
+        current
+            .iter()
+            .find(|feature| feature.id == id)
+            .map_or(f32::NAN, Feature::value)
+    };
+    let differs = |&(id, value): &(FeatureId, f32)| cached(id) != value;
+
+    saved
+        .iter()
+        .filter(|&&(id, value)| {
+            differs(&(id, value))
+                || saved.iter().any(|entry| {
+                    differs(entry) && entry.0.dependencies().contains(&id)
+                })
+        })
+        .copied()
+        .collect()
 }

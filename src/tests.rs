@@ -254,4 +254,43 @@ mod tests {
         assert_eq!(restored.len(), features.len());
         assert!(restored.iter().all(|feature| feature.value().is_nan()));
     }
+
+    #[test]
+    fn profile_changes_only_include_differences_and_their_toggles() {
+        let current = features::all_features();
+        let set = |id: FeatureId, value: f32| {
+            current
+                .iter()
+                .find(|feature| feature.id == id)
+                .unwrap()
+                .set_cached(value)
+        };
+        set(FeatureId::LightingToggle, 0.0);
+        set(FeatureId::LightingColor, 0x00ff00 as f32);
+        set(FeatureId::CrystalizerToggle, 1.0);
+        set(FeatureId::CrystalizerLevel, 50.0);
+        // EqToggle stays NaN: couldn't be read
+
+        let saved = [
+            (FeatureId::LightingToggle, 0.0),
+            (FeatureId::LightingColor, 0xff0000 as f32),
+            (FeatureId::CrystalizerToggle, 1.0),
+            (FeatureId::CrystalizerLevel, 50.0),
+            (FeatureId::EqToggle, 0.0),
+        ];
+
+        assert_eq!(
+            crate::profile_changes(&current, &saved),
+            vec![
+                // unchanged, but the color write may switch it on
+                (FeatureId::LightingToggle, 0.0),
+                (FeatureId::LightingColor, 0xff0000 as f32),
+                (FeatureId::EqToggle, 0.0),
+            ]
+        );
+
+        set(FeatureId::LightingColor, 0xff0000 as f32);
+        set(FeatureId::EqToggle, 0.0);
+        assert!(crate::profile_changes(&current, &saved).is_empty());
+    }
 }

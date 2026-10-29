@@ -2,7 +2,7 @@
 
 use linuxblaster_control::{
     BlasterXG6, ConnectError, DEFAULT_BASE_PATH, FeatureId, MIC_EQ_PRESETS,
-    UDEV_RULE, UDEV_RULE_PATH, ValueKind,
+    UDEV_RULE, UDEV_RULE_PATH, ValueKind, remember_last_profile,
 };
 use eframe::egui::{
     self, Button, Color32, RichText, Vec2, Vec2b,
@@ -14,6 +14,7 @@ use egui_plot::{CoordinatesFormatter, Corner, GridInput, GridMark, Line, Plot, P
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use std::cmp::Reverse;
+use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, warn};
@@ -88,10 +89,13 @@ impl eframe::App for BlasterApp {
                                 return;
                             };
 
-                            if let Err(error) = self.0.apply_profile(path.clone()) {
-                                error!("Failed to apply profile from file");
-                                error!("Path: {}", path.display());
-                                error!("Error: {}", error);
+                            match self.0.apply_profile(path.clone()) {
+                                Ok(()) => remember_last_profile(&path),
+                                Err(error) => {
+                                    error!("Failed to apply profile from file");
+                                    error!("Path: {}", path.display());
+                                    error!("Error: {}", error);
+                                }
                             }
                         }
                         
@@ -106,10 +110,13 @@ impl eframe::App for BlasterApp {
                                 return;
                             };
 
-                            if let Err(error) = self.0.save_profile(path.clone()) {
-                                error!("Failed to save profile to file");
-                                error!("Path: {}", path.display());
-                                error!("Error: {}", error);
+                            match self.0.save_profile(path.clone()) {
+                                Ok(()) => remember_last_profile(&path),
+                                Err(error) => {
+                                    error!("Failed to save profile to file");
+                                    error!("Path: {}", path.display());
+                                    error!("Error: {}", error);
+                                }
                             }
                         }
                     });
@@ -1035,16 +1042,19 @@ pub struct Launcher {
     /// Running "Allow access" helper (pkexec), if any.
     setup: Option<std::thread::JoinHandle<Result<(), String>>>,
     setup_result: Option<Result<(), String>>,
+    /// Profile to apply once the G6 is connected (`--apply-last`, `--apply-profile`).
+    startup_profile: Option<PathBuf>,
 }
 
 impl Launcher {
-    pub fn new() -> Self {
+    pub fn new(startup_profile: Option<PathBuf>) -> Self {
         let mut launcher = Self {
             app: None,
             error: None,
             last_attempt: Instant::now(),
             setup: None,
             setup_result: None,
+            startup_profile,
         };
         launcher.try_connect();
         launcher
@@ -1054,6 +1064,18 @@ impl Launcher {
         self.last_attempt = Instant::now();
         match BlasterXG6::try_init() {
             Ok(device) => {
+                // on the first connection, which may be a few retries later
+                // (e.g. while the G6 is still coming back from a USB reset)
+                if let Some(path) = self.startup_profile.take() {
+                    match device.sync_profile(&path) {
+                        Ok(_) => remember_last_profile(&path),
+                        Err(error) => error!(
+                            "Failed to apply profile {} on startup: {}",
+                            path.display(),
+                            error
+                        ),
+                    }
+                }
                 self.app = Some(BlasterApp(device));
                 self.error = None;
             }
