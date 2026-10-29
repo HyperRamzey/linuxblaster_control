@@ -8,6 +8,7 @@ use linuxblaster_control::BlasterXG6;
 use tracing::{Level, warn};
 
 mod app;
+mod tray;
 use app::Launcher;
 
 fn main() -> eframe::Result<()> {
@@ -55,12 +56,13 @@ fn main() -> eframe::Result<()> {
     ))
     .expect("bundled icon is a valid PNG");
 
-    let options = eframe::NativeOptions {
+    // a new window is opened each time it's shown from the tray
+    let options = || eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Linuxblaster Control")
             // matches the .desktop file, so the taskbar shows the right icon
             .with_app_id("linuxblaster-control")
-            .with_icon(icon)
+            .with_icon(icon.clone())
             .with_resizable(true)
             .with_inner_size(Vec2::new(1050.0, 600.0))
             // the two-column panes need at least this much room
@@ -69,22 +71,16 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
-        "Linuxblaster Control",
-        options,
-        Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            cc.egui_ctx.set_pixels_per_point(1.5);
+    tray::run(app, options, |cc| {
+        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        cc.egui_ctx.set_pixels_per_point(1.5);
 
-            #[cfg(debug_assertions)]
-            {
-                cc.egui_ctx.debug_painter();
-                cc.egui_ctx.set_debug_on_hover(false);
-            }
-
-            Ok(Box::new(app))
-        }),
-    )
+        #[cfg(debug_assertions)]
+        {
+            cc.egui_ctx.debug_painter();
+            cc.egui_ctx.set_debug_on_hover(false);
+        }
+    })
 }
 
 const USAGE: &str = "\
@@ -93,6 +89,9 @@ Usage: linuxblaster_control [OPTIONS]
 Options:
   --apply-last            Apply the profile that was loaded or saved last
   --apply-profile <FILE>  Apply this profile
+  --tray, --minimized     Start hidden in the system tray
+  --minimize-to-tray      Minimizing also hides the window in the tray (X11 only)
+  --no-tray               No tray icon; closing the window quits
   -h, --help              Print this help
 
 The profile is applied to the active output once the G6 is connected.
@@ -119,6 +118,10 @@ fn parse_args(
         let next = match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
             "--apply-last" => StartupProfile::Last,
+            // read by tray::TrayOptions::from_args
+            "--tray" | "--minimized" | "--no-tray" | "--minimize-to-tray" => {
+                continue;
+            }
             "--apply-profile" => {
                 let path = args
                     .next()
@@ -168,6 +171,10 @@ mod tests {
         assert!(parse(&["--apply-profile="]).is_err());
         assert!(parse(&["--apply-last", "--apply-profile", "x"]).is_err());
         assert!(parse(&["--bogus"]).is_err());
+        assert_eq!(
+            parse(&["--tray", "--apply-last", "--no-tray"]),
+            Ok(Command::Run(Some(StartupProfile::Last)))
+        );
     }
 }
 

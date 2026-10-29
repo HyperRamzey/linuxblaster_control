@@ -171,6 +171,20 @@ Only the settings that differ from what the device reports are written.
 > [!IMPORTANT]
 > The profile format is custom to this application and is **not compatible** with official Creative Sound Blaster Command profiles (.json or .xml) from Windows.
 
+## System Tray
+
+The app shows an icon in the system tray (KDE Plasma and most other desktops; GNOME needs the *AppIndicator* extension). Its menu can show or hide the window, switch the lighting on and off, and quit. A left click on the icon shows or hides the window.
+
+Closing the window hides it in the tray. If there is no tray, closing the window quits as before.
+
+| Flag                         | Effect                                                         |
+|------------------------------|----------------------------------------------------------------|
+| `--tray` (or `--minimized`)  | Start hidden in the tray, e.g. for autostart                   |
+| `--minimize-to-tray`         | Minimizing the window also hides it in the tray (X11 only)     |
+| `--no-tray`                  | No tray icon; closing the window quits                         |
+
+To start the app in the tray when you log in, add `linuxblaster_control --tray` to your desktop's autostart (KDE: *System Settings → Autostart → Add → Add Application*, then add `--tray` to the command). If the tray isn't there yet when the app starts, it waits up to 10 seconds for it before showing the window instead.
+
 ## For Developers
 
 ### Building from Source

@@ -1060,6 +1060,19 @@ impl Launcher {
         launcher
     }
 
+    /// The connected G6, if any (used by the tray).
+    /// While the window is hidden the setup screen doesn't run,
+    /// so this keeps retrying the connection like it does.
+    pub fn device(&mut self) -> Option<&BlasterXG6> {
+        if self.app.is_none()
+            && self.setup.is_none()
+            && self.last_attempt.elapsed() >= RECONNECT_INTERVAL
+        {
+            self.try_connect();
+        }
+        self.app.as_ref().map(|app| &app.0)
+    }
+
     fn try_connect(&mut self) {
         self.last_attempt = Instant::now();
         match BlasterXG6::try_init() {

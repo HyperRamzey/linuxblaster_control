@@ -22,6 +22,7 @@ serde = "1.0.228"
 serde_json = "1.0.148"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 
 [build-dependencies]
 phf_codegen = "0.13.1"
