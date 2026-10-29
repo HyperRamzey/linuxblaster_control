@@ -7,6 +7,7 @@ use linuxblaster_control::BlasterXG6;
 use tracing::Level;
 
 mod app;
+mod tray;
 use app::Launcher;
 
 fn main() -> eframe::Result<()> {
@@ -31,12 +32,13 @@ fn main() -> eframe::Result<()> {
     ))
     .expect("bundled icon is a valid PNG");
 
-    let options = eframe::NativeOptions {
+    // a new window is opened each time it's shown from the tray
+    let options = || eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Linuxblaster Control")
             // matches the .desktop file, so the taskbar shows the right icon
             .with_app_id("linuxblaster-control")
-            .with_icon(icon)
+            .with_icon(icon.clone())
             .with_resizable(true)
             .with_inner_size(Vec2::new(1050.0, 600.0))
             // the two-column panes need at least this much room
@@ -45,22 +47,16 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
-        "Linuxblaster Control",
-        options,
-        Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            cc.egui_ctx.set_pixels_per_point(1.5);
+    tray::run(app, options, |cc| {
+        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        cc.egui_ctx.set_pixels_per_point(1.5);
 
-            #[cfg(debug_assertions)]
-            {
-                cc.egui_ctx.debug_painter();
-                cc.egui_ctx.set_debug_on_hover(false);
-            }
-
-            Ok(Box::new(app))
-        }),
-    )
+        #[cfg(debug_assertions)]
+        {
+            cc.egui_ctx.debug_painter();
+            cc.egui_ctx.set_debug_on_hover(false);
+        }
+    })
 }
 
 /// Results from "<headphone_name> FixedBandEQ.txt"
