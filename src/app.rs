@@ -1180,7 +1180,14 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                          the cap is re-applied after such a change and the \
                          Mixer slider stops at 97%. It is off by default \
                          because it also caps volume set by other clients; \
-                         turn it on only if you hear the distortion.",
+                         turn it on only if you hear the distortion.\n\n\
+                         What it fixes: bench measurements of the line \
+                         output (Audio Science Review, Toslink in) show \
+                         SINAD peaking around 112 dB with THD+N near \
+                         0.0004 % while the Speaker control sits at the \
+                         -2.00 dB step, and dropping once the volume is \
+                         pushed above it. The cap keeps the hardware \
+                         volume on that step, where the output is cleanest.",
                     )
                     .color(Color32::GRAY),
                 );
