@@ -748,8 +748,6 @@ pub fn install_virtual_sink() -> Result<String, String> {
             if let Some(volume) = virtual_volume {
                 let _ = set_sink_volume(VIRTUAL_SINK_NAME, volume);
             }
-            // The filter-chain output goes into the route's target sink.
-            let _ = set_sink_volume(&target, 100.0);
         }
         Some(name) if after.iter().any(|sink| sink.name == name) => {
             let _ = set_default_sink(name);
@@ -763,6 +761,12 @@ pub fn install_virtual_sink() -> Result<String, String> {
             }
         }
     }
+
+    // The route's tail stage must never attenuate: the filter-chain output
+    // leaves on this sink (the G6 USB device, or the onboard S/PDIF in
+    // Toslink mode), and the only user-facing volume is the virtual sink.
+    // Pin it whatever the previous default was.
+    let _ = set_sink_volume(&target, 100.0);
 
     Ok(format!(
         "Installed the virtual 7.1 sink.\nPlugin: {}\nConfig: {}\nRoute: {}\nTarget: {}",
