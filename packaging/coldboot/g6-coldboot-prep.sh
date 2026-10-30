@@ -189,7 +189,7 @@ udevadm settle --timeout=10 2>/dev/null || true
 # which reports an illegal UAC clock source. Load it now, after the clean
 # re-enumeration, so the driver only ever probes a valid clock tree.
 if ! grep -q '^snd_usb_audio ' /proc/modules 2>/dev/null; then
-    if /usr/bin/modprobe snd-usb-audio 2>/dev/null; then
+    if modprobe snd-usb-audio 2>/dev/null; then
         log "loaded snd-usb-audio after clean re-enumeration"
     else
         log "WARNING: failed to load snd-usb-audio"
