@@ -1277,18 +1277,6 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                         }
                     }
                 }
-
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new(
-                        "The virtual sink uses the g6ct LADSPA plugin, \
-                         vendored from g6-re under vendor/g6ct and licensed \
-                         MIT like the app. It is compiled into this binary by \
-                         build.rs, so installing needs no source tree and no \
-                         download.",
-                    )
-                    .color(Color32::GRAY),
-                );
             });
         });
 }
