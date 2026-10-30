@@ -828,6 +828,27 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                         );
                         ui.end_row();
 
+                        ui.label("Feeds");
+                        let feeds_label = match &status.uplink_target {
+                            Some(target)
+                                if Some(target.as_str())
+                                    == status.g6_sink.as_deref() =>
+                            {
+                                "G6 Pro (USB)".to_owned()
+                            }
+                            Some(_) => "onboard S/PDIF (optical)".to_owned(),
+                            None => "not written".to_owned(),
+                        };
+                        ui.label(feeds_label).on_hover_text(
+                            status.uplink_target.clone().unwrap_or_else(
+                                || {
+                                    "No drop-in is installed yet."
+                                        .to_owned()
+                                },
+                            ),
+                        );
+                        ui.end_row();
+
                         if let Some(error) = &status.error {
                             ui.label("Problem");
                             ui.colored_label(
@@ -837,6 +858,44 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                             ui.end_row();
                         }
                     });
+
+                ui.add_space(6.0);
+                let mut uplink = settings.toslink_uplink;
+                ui.horizontal(|ui| {
+                    ui.label("Uplink route:");
+                    ui.selectable_value(
+                        &mut uplink,
+                        false,
+                        "G6 Pro (USB)",
+                    );
+                    ui.selectable_value(
+                        &mut uplink,
+                        true,
+                        "Onboard optical → G6 Toslink",
+                    );
+                });
+                if uplink != settings.toslink_uplink {
+                    settings.toslink_uplink = uplink;
+                    save_system_settings(&settings);
+                    *SYSTEM_SETTINGS.lock().unwrap() = settings;
+                    // Re-install so the drop-in is rewritten for the new
+                    // route; the restart asks first, like an install does.
+                    *CONFIRM_ACTION.lock().unwrap() =
+                        Some(SystemAction::InstallSink);
+                }
+                ui.label(
+                    RichText::new(
+                        "Optical sends the MatrixEncoder's 2.0 through the \
+                         onboard S/PDIF into the G6's Toslink input: the G6 \
+                         renders it with its own DSP, and its USB link only \
+                         carries the control connection (EQ, mixer, \
+                         lighting). All volumes stay in the virtual sink; \
+                         the S/PDIF sink is pinned at 100% to keep the \
+                         cable bit-exact. Changing the route reinstalls the \
+                         sink, which restarts PipeWire.",
+                    )
+                    .color(Color32::GRAY),
+                );
 
                 ui.add_space(6.0);
                 if install_busy {
@@ -851,7 +910,8 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                         );
                     });
                 } else {
-                    let can_install = status.g6_sink.is_some();
+                    let can_install = status.g6_sink.is_some()
+                        || settings.toslink_uplink;
                     let label = if status.virtual_installed {
                         "Reinstall / repair virtual 7.1 sink"
                     } else {
@@ -876,7 +936,7 @@ fn system_pane(blaster: &BlasterXG6, ui: &mut egui::Ui) {
                     if !can_install {
                         ui.label(
                             RichText::new(
-                                "Connect the G6 first: the installer needs \
+                                "Connect the G6 first: the USB route needs \
                                  the sink name of the attached device.",
                             )
                             .color(Color32::from_rgb(230, 190, 80)),

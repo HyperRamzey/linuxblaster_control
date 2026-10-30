@@ -218,6 +218,10 @@ The installer ships the plugin with the app: `libg6ct_ladspa_f64.so` is compiled
 
 The toggle routes the default output between the G6 Pro sink (direct) and the virtual sink. When **sync volume** is enabled, the active sink's PipeWire volume is the single volume control and the inactive gain stage stays at 100%; the volume is carried over when the output switches.
 
+### Toslink route (onboard S/PDIF)
+
+The MatrixEncoder output can also leave the PC from a different sound card: with **Onboard optical → G6 Toslink** selected in the System pane, the virtual sink's 2.0 goes out through the motherboard's S/PDIF (ALCS1200A and friends, in the Pro profile the digital PCM is `pro-output-1`) over an optical cable into the G6's **Toslink input**. The chain is then: the player (bit-exact 7.1) → virtual sink → onboard optical → G6 Toslink in, and the G6 renders it with its own hardware while the USB link only carries the control connection. The G6 switches its input to optical by itself when the signal arrives; if yours does not, cycle the source once on the device. The S/PDIF sink stays pinned at 100% so the cable is bit-exact — the only volume stage is the virtual sink.
+
 The **SINAD fix** limits the hardware Speaker control to raw `124/128` — 97% on the slider, which is −2.00 dB. The cap is enforced on every write, and if another client or the knob pushes the hardware volume above it, the app restores the cap automatically. It is **off by default**, because while it is on it also overrides volume set by other clients; enable it only if you hear the distortion it fixes.
 
 ## For Developers

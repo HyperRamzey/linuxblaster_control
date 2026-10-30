@@ -178,6 +178,11 @@ pub struct Settings {
     pub sync_volume: bool,
     /// Cap the G6 hardware Speaker volume at -2.00 dB (raw 124/128).
     pub sinad_fix: bool,
+    /// Send the MatrixEncoder output through the onboard S/PDIF (optical)
+    /// so the G6 receives it on its Toslink input, instead of feeding the
+    /// G6's own USB device. The USB link then only carries the control
+    /// connection (HID: EQ, mixer, toggle encryption).
+    pub toslink_uplink: bool,
 }
 
 impl Settings {
@@ -264,6 +269,11 @@ pub struct Status {
     pub g6_sink: Option<String>,
     pub virtual_installed: bool,
     pub config_present: bool,
+    /// The `target.object` of the installed drop-in: what the MatrixEncoder
+    /// currently feeds (G6 Pro device, or the onboard S/PDIF in Toslink
+    /// mode). Read from the live config file, not from the setting — the
+    /// setting can change without a reinstall having happened yet.
+    pub uplink_target: Option<String>,
     pub plugin: Option<PathBuf>,
     pub virtual_volume: Option<f32>,
     pub g6_volume: Option<f32>,
@@ -328,9 +338,19 @@ impl Status {
             _ => None,
         };
 
+        let uplink_target = config_target();
+
         if error.is_none() {
             // A missing G6 is not an error by itself; the pane explains it.
-            if g6_sink.is_none() && virtual_volume.is_some() {
+            // In Toslink mode the virtual sink does not need the G6's USB
+            // device at all, so only warn when the drop-in targets it.
+            let tail_needs_g6 = uplink_target.as_deref().is_none_or(|tail| {
+                Some(tail) == g6_sink.as_deref()
+            });
+            if g6_sink.is_none()
+                && virtual_volume.is_some()
+                && tail_needs_g6
+            {
                 error = Some(
                     "The G6 Pro sink is missing; the virtual sink has no target."
                         .to_owned(),
@@ -343,6 +363,7 @@ impl Status {
             g6_sink,
             virtual_installed,
             config_present,
+            uplink_target,
             plugin,
             virtual_volume,
             g6_volume,
@@ -363,6 +384,60 @@ pub fn config_path() -> PathBuf {
         })
         .unwrap_or_else(|| PathBuf::from(".config"));
     config_home.join("pipewire/pipewire.conf.d/99-g6-ct-downmix.conf")
+}
+
+/// The `target.object` of the installed drop-in: what the MatrixEncoder
+/// currently feeds. Read from the live config, not from the setting —
+/// the setting can change without a reinstall having happened yet.
+pub fn config_target() -> Option<String> {
+    let config = fs::read_to_string(config_path()).ok()?;
+    let line = config
+        .lines()
+        .find(|line| line.trim_start().starts_with("target.object"))?;
+    parse_target_object(line)
+}
+
+/// The quoted `target.object` value from one config line, un-escaped.
+fn parse_target_object(line: &str) -> Option<String> {
+    let key = line.split('=').next()?;
+    if !key.trim_start().starts_with("target.object") {
+        return None;
+    }
+    let rest = line.split('=').nth(1)?;
+    let rest = rest.trim();
+    let inner = rest.strip_prefix('"')?.strip_suffix('"')?;
+    // The reverse of escape_pipewire_string: \\ first (sentinel), then \".
+    Some(
+        inner
+            .replace("\\\\", "\u{0}")
+            .replace("\\\"", "\"")
+            .replace('\u{0}', "\\"),
+    )
+}
+
+/// The onboard S/PDIF sink that feeds the G6's Toslink input by cable.
+///
+/// HDA cards in the Pro profile expose their raw PCM devices as
+/// `pro-output-*` sinks; on AMD Starship/Matisse boards (ALCS1200A) and most
+/// Intel H-series boards the digital/S/PDIF PCM is `pro-output-1`, while
+/// `pro-output-0` is the analog line. Without the Pro profile PipeWire names
+/// a routing digital device `*.iec958-*` when one is exposed separately.
+/// HDMI nodes are named `.hdmi-*` and USB nodes (the G6 itself) start with
+/// `alsa_output.usb-`, so both are excluded by construction.
+pub fn find_spdif_uplink_sink(sinks: &[Sink]) -> Option<String> {
+    let pci_pro = |sink: &Sink| {
+        sink.name.starts_with("alsa_output.pci-")
+            && sink.name.contains("pro-output-1")
+    };
+    let pci_iec958 = |sink: &Sink| {
+        sink.name.starts_with("alsa_output.pci-")
+            && sink.name.contains("iec958")
+    };
+    sinks
+        .iter()
+        .find(|sink| pci_pro(sink))
+        .or_else(|| sinks.iter().find(|sink| pci_iec958(sink)))
+        .map(|sink| sink.name.clone())
 }
 
 /// Stable location for the locally built/copied plugin.
@@ -585,10 +660,13 @@ pub fn switch_output(use_virtual: bool, preserve_volume: bool) -> Result<(), Str
 
     if preserve_volume {
         if use_virtual {
-            // The virtual sink's filter-chain output goes into the G6 Pro
-            // sink; that stage must not attenuate as well. Do this after
-            // moving streams so direct playback does not jump first.
-            set_sink_volume(&g6, 100.0)?;
+            // The virtual sink's filter-chain output goes into whatever the
+            // installed drop-in targets (the G6 Pro device, or the onboard
+            // S/PDIF in Toslink mode); that stage must not attenuate as
+            // well. Do this after moving streams so direct playback does
+            // not jump first.
+            let tail = config_target().unwrap_or_else(|| g6.clone());
+            set_sink_volume(&tail, 100.0)?;
         } else {
             set_sink_volume(VIRTUAL_SINK_NAME, 100.0).ok();
         }
@@ -597,7 +675,7 @@ pub fn switch_output(use_virtual: bool, preserve_volume: bool) -> Result<(), Str
 }
 
 /// Writes the bundled plugin to its stable path, writes the PipeWire
-/// drop-in for the current G6 sink, and reloads PipeWire.
+/// drop-in for the configured route, and reloads PipeWire.
 ///
 /// The plugin is part of this MIT-licensed project and is compiled into
 /// the binary, so installation needs neither a source tree nor a download.
@@ -605,13 +683,39 @@ pub fn install_virtual_sink() -> Result<String, String> {
     let plugin = ensure_plugin()?;
 
     let sinks = list_sinks()?;
-    let g6 = find_g6_sink(&sinks)
-        .ok_or_else(|| {
+    let settings = Settings::load();
+
+    let g6 = find_g6_sink(&sinks).map(|sink| sink.name.clone());
+    if g6.is_none() && !settings.toslink_uplink {
+        return Err(
             "The G6 Pro sink is not available. Connect the G6 first."
-                .to_owned()
-        })?
-        .name
-        .clone();
+                .to_owned(),
+        );
+    }
+
+    // The route: the MatrixEncoder's 2.0 goes into the G6's own USB device
+    // (the usual route), or through the onboard optical into the G6's
+    // Toslink input. The G6 is not needed on USB for the latter.
+    let (target, route): (String, &'static str) = if settings.toslink_uplink {
+        let spdif = find_spdif_uplink_sink(&sinks).ok_or_else(|| {
+            format!(
+                "No onboard S/PDIF sink found for the Toslink route. \
+                 Available sinks: {}",
+                sinks
+                    .iter()
+                    .map(|sink| sink.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+        (spdif, "onboard optical (S/PDIF)")
+    } else {
+        (
+            g6.clone()
+                .expect("G6 checked for the USB route above"),
+            "G6 Pro (USB)",
+        )
+    };
 
     let old_default = default_sink().ok().flatten();
     let was_virtual = old_default.as_deref() == Some(VIRTUAL_SINK_NAME);
@@ -620,9 +724,9 @@ pub fn install_virtual_sink() -> Result<String, String> {
     } else {
         None
     };
-    let g6_volume = sink_volume(&g6).ok();
+    let g6_volume = g6.as_deref().and_then(|name| sink_volume(name).ok());
 
-    let config = config_contents(&plugin, &g6);
+    let config = config_contents(&plugin, &target);
     write_atomic(&config_path(), &config)?;
 
     restart_pipewire()?;
@@ -631,7 +735,9 @@ pub fn install_virtual_sink() -> Result<String, String> {
     // filter-chain node. Wait for it before restoring the previous default:
     // otherwise the restore is skipped and PipeWire re-applies its stored
     // default, which is usually the virtual sink.
-    let _ = wait_for_sink(&g6, Duration::from_secs(5));
+    if let Some(g6) = &g6 {
+        let _ = wait_for_sink(g6, Duration::from_secs(5));
+    }
 
     // Keep the user's previous default. A full PipeWire restart can
     // otherwise leave the virtual sink or the G6 sink selected by itself.
@@ -642,27 +748,28 @@ pub fn install_virtual_sink() -> Result<String, String> {
             if let Some(volume) = virtual_volume {
                 let _ = set_sink_volume(VIRTUAL_SINK_NAME, volume);
             }
-            // The filter-chain output goes into the G6 Pro sink.
-            let _ = set_sink_volume(&g6, 100.0);
+            // The filter-chain output goes into the route's target sink.
+            let _ = set_sink_volume(&target, 100.0);
         }
         Some(name) if after.iter().any(|sink| sink.name == name) => {
             let _ = set_default_sink(name);
-            if let Some(volume) = g6_volume {
-                let _ = set_sink_volume(&g6, volume);
+            if let (Some(g6), Some(volume)) = (&g6, g6_volume) {
+                let _ = set_sink_volume(g6, volume);
             }
         }
         _ => {
-            if let Some(volume) = g6_volume {
-                let _ = set_sink_volume(&g6, volume);
+            if let (Some(g6), Some(volume)) = (&g6, g6_volume) {
+                let _ = set_sink_volume(g6, volume);
             }
         }
     }
 
     Ok(format!(
-        "Installed the virtual 7.1 sink.\nPlugin: {}\nConfig: {}\nTarget: {}",
+        "Installed the virtual 7.1 sink.\nPlugin: {}\nConfig: {}\nRoute: {}\nTarget: {}",
         plugin.display(),
         config_path().display(),
-        g6
+        route,
+        target
     ))
 }
 
@@ -997,8 +1104,61 @@ mod tests {
             serde_json::from_str(r#"{"sync_volume":true}"#).unwrap();
         assert!(settings.sync_volume);
         assert!(!settings.sinad_fix);
+        assert!(!settings.toslink_uplink);
+
+        let settings: Settings =
+            serde_json::from_str(r#"{"sync_volume":true,"toslink_uplink":true}"#)
+                .unwrap();
+        assert!(settings.sync_volume);
+        assert!(settings.toslink_uplink);
 
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn finds_the_spdif_uplink_and_never_the_g6_or_hdmi() {
+        let sinks = parse_short_sinks(
+            "72\talsa_output.pci-0000_06_00.1.hdmi-stereo\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED\n\
+73\talsa_output.usb-Creative_Technology_Ltd_Sound_BlasterX_G6_6D00664763X-00.pro-output-0\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED\n\
+75\talsa_output.pci-0000_08_00.4.pro-output-0\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED\n\
+76\talsa_output.pci-0000_08_00.4.pro-output-1\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED\n",
+        );
+        assert_eq!(
+            find_spdif_uplink_sink(&sinks).as_deref(),
+            Some("alsa_output.pci-0000_08_00.4.pro-output-1")
+        );
+
+        // Without the Pro profile, a separately exposed digital device is
+        // the fallback shape.
+        let sinks = parse_short_sinks(
+            "1\talsa_output.pci-0000_00_1f.3.analog-stereo\tPipeWire\ts32le 2ch 48000Hz\tIDLE\n\
+2\talsa_output.pci-0000_00_1f.3.iec958-stereo\tPipeWire\ts32le 2ch 48000Hz\tIDLE\n",
+        );
+        assert_eq!(
+            find_spdif_uplink_sink(&sinks).as_deref(),
+            Some("alsa_output.pci-0000_00_1f.3.iec958-stereo")
+        );
+
+        assert!(find_spdif_uplink_sink(&[]).is_none());
+    }
+
+    #[test]
+    fn reads_the_target_object_line_and_unescapes_it() {
+        assert_eq!(
+            parse_target_object(
+                "                target.object    = \
+                 \"alsa_output.pci-0000_08_00.4.pro-output-1\""
+            ),
+            Some("alsa_output.pci-0000_08_00.4.pro-output-1".to_owned())
+        );
+        assert_eq!(
+            parse_target_object("target.object = \"a\\\"b\\\\c\""),
+            Some("a\"b\\c".to_owned())
+        );
+        assert_eq!(
+            parse_target_object("node.name = \"g6_ct_downmix\""),
+            None,
+        );
     }
 }
