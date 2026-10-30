@@ -16,4 +16,4 @@ ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="041e", ATTR{idProduct}=="3256"
 # Consequence: the blacklist is per module, not per device. If the G6 is not
 # attached at boot the prep never runs, so no other USB audio device gets the
 # driver either. Run "sudo modprobe snd-usb-audio" once, or attach the G6
-# once and let the prep run. This is stated in the installer prompt too.
+# once and let the prep run. See README.md.

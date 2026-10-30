@@ -13,7 +13,7 @@
 
 rustPlatform.buildRustPackage rec {
   pname = "linuxblaster_control";
-  version = "2.4.0";
+  version = "2.4.1";
 
   # only what the build needs, so target/ and other local files stay out of the store
   src = lib.fileset.toSource {

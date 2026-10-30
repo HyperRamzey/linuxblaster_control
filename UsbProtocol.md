@@ -65,7 +65,8 @@ No reset is needed. `hidapi` with its hidraw backend (`linux-static-hidraw`) use
 With `hidapi`'s **libusb** backend (or pyusb/rusb), the kernel driver gets detached and the
 interrupt pipe stays silent until the device receives a **USB reset** (`USBDEVFS_RESET`).
 The reset affects the entire device (briefly interrupts audio), so the hidraw path is preferable.
-Linuxblaster Control only falls back to the reset if the device doesn't answer a Ping (`0x06`).
+Linuxblaster Control never resets the device itself: the reset leaves the audio interface unusable
+until the next re-enumeration. The optional helper in `packaging/coldboot/` does it once at boot.
 
 To find the right hidraw node: it's the one whose parent USB interface ends in `:1.4`
 (e.g. `readlink -f /sys/class/hidraw/hidraw2/device` → `...:1.4/...`).
