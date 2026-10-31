@@ -1,4 +1,7 @@
 #[cfg(test)]
+// The file is already `tests.rs`; keeping the inner module named `tests`
+// matches how the rest of the crate refers to it.
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::features::{self, FeatureId, MIC_EQ_PRESETS, ValueKind};
 
@@ -330,15 +333,24 @@ mod tests {
         let state = crate::BlasterXG6 {
             features: features::all_features(),
             writes: std::sync::atomic::AtomicU64::new(7),
+            volume_cap: std::sync::Mutex::new(Some(0.5)),
         };
 
         let json = serde_json::to_string(&state).unwrap();
         assert!(!json.contains("writes"));
+        assert!(!json.contains("volume_cap"));
         assert!(json.contains("\"DirectMode\""));
         assert!(json.contains("\"SbxMaster\""));
 
         let restored: crate::BlasterXG6 = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.features.len(), state.features.len());
         assert_eq!(restored.write_count(), 0);
+        assert_eq!(restored.volume_cap(), None);
+    }
+
+    #[test]
+    fn sinad_cap_is_the_minus_two_db_step() {
+        assert!((crate::SINAD_VOLUME_CAP - 124.0 / 128.0).abs() < 1e-6);
+        assert_eq!((crate::SINAD_VOLUME_CAP * 128.0).round(), 124.0);
     }
 }
